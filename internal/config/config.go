@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zfstui/zfstui/internal/schedule"
 )
+
+// scheduleNameRe restricts names so they are safe in cron command lines.
+var scheduleNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type Retention struct {
 	KeepLast *int  `yaml:"keep_last,omitempty"`
@@ -94,17 +100,28 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(s.Name) == "" {
 			return fmt.Errorf("schedules[%d]: name is required", i)
 		}
+		if !scheduleNameRe.MatchString(s.Name) {
+			return fmt.Errorf("schedule %q: name must match [A-Za-z0-9._-]+", s.Name)
+		}
 		if strings.TrimSpace(s.Dataset) == "" {
 			return fmt.Errorf("schedule %q: dataset is required", s.Name)
 		}
 		if strings.TrimSpace(s.Cron) == "" {
 			return fmt.Errorf("schedule %q: cron is required", s.Name)
 		}
+		if err := schedule.ValidateCron(s.Cron); err != nil {
+			return fmt.Errorf("schedule %q: %w", s.Name, err)
+		}
 		if strings.TrimSpace(s.Prefix) == "" {
 			return fmt.Errorf("schedule %q: prefix is required", s.Name)
 		}
 		if s.Retention.KeepLast != nil && *s.Retention.KeepLast < 0 {
 			return fmt.Errorf("schedule %q: keep_last must be >= 0", s.Name)
+		}
+		if strings.TrimSpace(s.Retention.MaxAge) != "" {
+			if _, err := schedule.ParseMaxAge(s.Retention.MaxAge); err != nil {
+				return fmt.Errorf("schedule %q: %w", s.Name, err)
+			}
 		}
 		key := s.Name
 		if _, ok := seen[key]; ok {

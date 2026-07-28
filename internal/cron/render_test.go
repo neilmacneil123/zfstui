@@ -21,8 +21,11 @@ func TestRenderSystemEnabledOnly(t *testing.T) {
 	if !strings.Contains(out, cron.SystemHeader) {
 		t.Fatal("missing header")
 	}
-	if !strings.Contains(out, "run --config /etc/zfstui/config.yaml --schedule on") {
+	if !strings.Contains(out, `run --config "/etc/zfstui/config.yaml" --schedule on`) {
 		t.Fatal(out)
+	}
+	if !strings.Contains(out, `"/usr/local/bin/zfstui"`) {
+		t.Fatal("binary should be quoted:", out)
 	}
 	if strings.Contains(out, "schedule off") {
 		t.Fatal("disabled should be omitted")
@@ -59,7 +62,7 @@ func TestRenderUserBlockEnabledOnly(t *testing.T) {
 	if !strings.Contains(out, cron.EndMarker) {
 		t.Fatal("missing end marker")
 	}
-	if !strings.Contains(out, "0 * * * * /usr/local/bin/zfstui run --config /etc/zfstui/config.yaml --schedule on") {
+	if !strings.Contains(out, `0 * * * * "/usr/local/bin/zfstui" run --config "/etc/zfstui/config.yaml" --schedule on`) {
 		t.Fatal(out)
 	}
 	if strings.Contains(out, " root ") {

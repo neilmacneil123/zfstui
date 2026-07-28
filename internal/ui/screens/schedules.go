@@ -83,11 +83,15 @@ func (s Schedules) handleConfirm(msg ConfirmResultMsg) (Schedules, tea.Cmd) {
 		return s, schedStatus("invalid delete target", true)
 	}
 	name := s.Cfg.Schedules[idx].Name
+	prev := append([]config.Schedule(nil), s.Cfg.Schedules...)
+	prevCursor := s.cursor
 	s.Cfg.Schedules = append(s.Cfg.Schedules[:idx], s.Cfg.Schedules[idx+1:]...)
 	if s.cursor >= len(s.Cfg.Schedules) && s.cursor > 0 {
 		s.cursor = len(s.Cfg.Schedules) - 1
 	}
 	if err := s.save(); err != nil {
+		s.Cfg.Schedules = prev
+		s.cursor = prevCursor
 		return s, schedStatus(err.Error(), true)
 	}
 	return s, schedStatus(fmt.Sprintf("deleted %s", name), false)
@@ -101,6 +105,8 @@ func (s Schedules) handleFormResult(msg ScheduleFormResultMsg) (Schedules, tea.C
 		return s, schedStatus("no config loaded", true)
 	}
 
+	prev := append([]config.Schedule(nil), s.Cfg.Schedules...)
+	prevCursor := s.cursor
 	sched := msg.Schedule
 	if msg.EditIndex >= 0 && msg.EditIndex < len(s.Cfg.Schedules) {
 		// Preserve enabled flag from existing entry.
@@ -112,9 +118,13 @@ func (s Schedules) handleFormResult(msg ScheduleFormResultMsg) (Schedules, tea.C
 		s.cursor = len(s.Cfg.Schedules) - 1
 	}
 	if err := s.Cfg.Validate(); err != nil {
+		s.Cfg.Schedules = prev
+		s.cursor = prevCursor
 		return s, schedStatus(err.Error(), true)
 	}
 	if err := s.save(); err != nil {
+		s.Cfg.Schedules = prev
+		s.cursor = prevCursor
 		return s, schedStatus(err.Error(), true)
 	}
 	action := "added"

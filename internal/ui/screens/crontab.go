@@ -42,10 +42,12 @@ type Crontab struct {
 	// SystemPath is the system cron.d path.
 	SystemPath string
 
-	preview   string
+	Confirm Confirm
+
+	preview    string
 	previewErr string
-	busy      bool
-	lastOp    string
+	busy       bool
+	lastOp     string
 }
 
 // NewCrontab builds the crontab screen and computes preview.
@@ -67,8 +69,10 @@ func (c *Crontab) SetDryRun(on bool) {
 	c.DryRun = on
 }
 
-// InputCaptured is always false for crontab (no modal text capture).
-func (c Crontab) InputCaptured() bool { return false }
+// InputCaptured reports whether a modal is capturing keys (confirm).
+func (c Crontab) InputCaptured() bool {
+	return c.Confirm.Active
+}
 
 func isRoot() bool {
 	// Geteuid is -1 on Windows; only treat real root as system-capable.
@@ -105,9 +109,17 @@ func (c Crontab) ModeLabel() string {
 // Init implements tea.Model.
 func (c Crontab) Init() tea.Cmd { return nil }
 
-// Update handles keys and op results.
+// Update handles keys, confirm results, and op results.
 func (c Crontab) Update(msg tea.Msg) (Crontab, tea.Cmd) {
+	if c.Confirm.Active {
+		var cmd tea.Cmd
+		c.Confirm, cmd = c.Confirm.Update(msg)
+		return c, cmd
+	}
+
 	switch msg := msg.(type) {
+	case ConfirmResultMsg:
+		return c.handleConfirm(msg)
 	case CrontabOpDoneMsg:
 		c.busy = false
 		if msg.Err != nil {
@@ -117,6 +129,19 @@ func (c Crontab) Update(msg tea.Msg) (Crontab, tea.Cmd) {
 		return c, cronStatus(fmt.Sprintf("%s ok (%s)", msg.Op, c.ModeLabel()), false)
 	case tea.KeyMsg:
 		return c.updateKeys(msg)
+	}
+	return c, nil
+}
+
+func (c Crontab) handleConfirm(msg ConfirmResultMsg) (Crontab, tea.Cmd) {
+	if !msg.Confirmed {
+		return c, cronStatus("cancelled", false)
+	}
+	switch msg.ID {
+	case "install":
+		return c.doInstall()
+	case "uninstall":
+		return c.doUninstall()
 	}
 	return c, nil
 }
@@ -155,6 +180,34 @@ func (c Crontab) beginInstall() (Crontab, tea.Cmd) {
 		mode := c.ModeLabel()
 		return c, cronStatus(fmt.Sprintf("dry-run: would install %s crontab (preview only)", mode), false)
 	}
+	mode := c.ModeLabel()
+	target := "user crontab (managed block)"
+	if c.PreferSystem {
+		target = c.SystemPath
+	}
+	body := fmt.Sprintf("Install managed %s crontab?\n  %s", mode, target)
+	c.Confirm = OpenYesNo("install", "Install crontab", body, "", true)
+	c.Confirm.Width = minInt(c.Width-4, 64)
+	return c, nil
+}
+
+func (c Crontab) beginUninstall() (Crontab, tea.Cmd) {
+	if c.DryRun {
+		mode := c.ModeLabel()
+		return c, cronStatus(fmt.Sprintf("dry-run: would uninstall %s crontab (no write)", mode), false)
+	}
+	mode := c.ModeLabel()
+	target := "user crontab managed block"
+	if c.PreferSystem {
+		target = c.SystemPath
+	}
+	body := fmt.Sprintf("Remove managed %s crontab?\n  %s", mode, target)
+	c.Confirm = OpenYesNo("uninstall", "Uninstall crontab", body, "", true)
+	c.Confirm.Width = minInt(c.Width-4, 64)
+	return c, nil
+}
+
+func (c Crontab) doInstall() (Crontab, tea.Cmd) {
 	c.busy = true
 	c.lastOp = "install"
 	cfg, path, bin, system, dest := c.Cfg, c.CfgPath, c.Binary, c.PreferSystem, c.SystemPath
@@ -169,11 +222,7 @@ func (c Crontab) beginInstall() (Crontab, tea.Cmd) {
 	}
 }
 
-func (c Crontab) beginUninstall() (Crontab, tea.Cmd) {
-	if c.DryRun {
-		mode := c.ModeLabel()
-		return c, cronStatus(fmt.Sprintf("dry-run: would uninstall %s crontab (no write)", mode), false)
-	}
+func (c Crontab) doUninstall() (Crontab, tea.Cmd) {
 	c.busy = true
 	c.lastOp = "uninstall"
 	system, dest := c.PreferSystem, c.SystemPath
@@ -252,5 +301,9 @@ func (c Crontab) View() string {
 		b.WriteString(muted.Render(fmt.Sprintf("  %d enabled schedule(s) of %d", enabled, len(c.Cfg.Schedules))))
 	}
 
-	return b.String()
+	body := b.String()
+	if c.Confirm.Active {
+		return body + "\n\n" + lipgloss.NewStyle().PaddingLeft(2).Render(c.Confirm.View())
+	}
+	return body
 }

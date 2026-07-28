@@ -68,7 +68,11 @@ func (f *Fake) DestroySnapshot(ctx context.Context, fullName string, recursive b
 }
 
 func (f *Fake) Rollback(ctx context.Context, fullName string, recursive bool) error {
-	f.Log = append(f.Log, "rollback "+fullName)
+	if recursive {
+		f.Log = append(f.Log, "rollback -r "+fullName)
+	} else {
+		f.Log = append(f.Log, "rollback "+fullName)
+	}
 	return f.Err
 }
 

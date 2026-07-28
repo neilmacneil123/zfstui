@@ -281,6 +281,35 @@ func TestCrontabDryRunInstall(t *testing.T) {
 	if c.busy {
 		t.Fatal("dry-run must not set busy")
 	}
+	if c.Confirm.Active {
+		t.Fatal("dry-run must not open confirm")
+	}
+}
+
+func TestCrontabInstallRequiresConfirm(t *testing.T) {
+	cfg := config.Default()
+	cfg.Schedules = []config.Schedule{{
+		Name: "s1", Dataset: "tank/home", Cron: "0 * * * *", Prefix: "zfstui", Enabled: true,
+	}}
+	c := NewCrontab(&cfg, "/tmp/cfg.yaml", "/usr/bin/zfstui", false)
+	c, cmd := c.beginInstall()
+	if cmd != nil {
+		t.Fatal("live install should open confirm, not emit status yet")
+	}
+	if !c.Confirm.Active || c.Confirm.ID != "install" {
+		t.Fatalf("expected install confirm: active=%v id=%q", c.Confirm.Active, c.Confirm.ID)
+	}
+	// cancel
+	c, cmd = c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	res := cmd().(ConfirmResultMsg)
+	c, cmd = c.Update(res)
+	st := cmd().(CrontabStatusMsg)
+	if st.IsErr || !strings.Contains(st.Text, "cancel") {
+		t.Fatalf("status: %#v", st)
+	}
+	if c.busy {
+		t.Fatal("cancel must not start install")
+	}
 }
 
 func TestRestoreWizardRollback(t *testing.T) {
@@ -326,13 +355,44 @@ func TestRestoreWizardRollback(t *testing.T) {
 	if req.Op != "rollback" || req.Snapshot != "tank/home@a" {
 		t.Fatalf("req: %#v", req)
 	}
+	// Newer snaps exist → rollback must use recursive (-r) even if default was false.
+	if !req.Recursive {
+		t.Fatalf("expected Recursive=true when newer snapshots exist: %#v", req)
+	}
 
 	f := zfs.NewFake()
 	done := RestoreCmd(f, req)().(RestoreOpDoneMsg)
 	if done.Err != nil {
 		t.Fatal(done.Err)
 	}
-	if len(f.Log) != 1 || f.Log[0] != "rollback tank/home@a" {
+	if len(f.Log) != 1 || f.Log[0] != "rollback -r tank/home@a" {
+		t.Fatalf("log: %v", f.Log)
+	}
+}
+
+func TestRestoreWizardRollbackNoNewerNotForcedRecursive(t *testing.T) {
+	snaps := []zfs.Snapshot{
+		{Name: "tank/home@only", Creation: time.Unix(1, 0).UTC()},
+	}
+	s := NewSnapshots("tank/home", "zfstui", false)
+	s.snaps = snaps
+	s.cursor = 0
+	s, _ = s.beginRestore()
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	for _, r := range "tank/home" {
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	req := cmd().(RestoreRequestMsg)
+	if req.Recursive {
+		t.Fatalf("no newer snaps and default false → Recursive should stay false: %#v", req)
+	}
+	f := zfs.NewFake()
+	done := RestoreCmd(f, req)().(RestoreOpDoneMsg)
+	if done.Err != nil {
+		t.Fatal(done.Err)
+	}
+	if len(f.Log) != 1 || f.Log[0] != "rollback tank/home@only" {
 		t.Fatalf("log: %v", f.Log)
 	}
 }

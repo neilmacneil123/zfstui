@@ -58,6 +58,44 @@ func TestValidateRejectsDuplicateNames(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidCron(t *testing.T) {
+	cfg := config.Default()
+	cfg.Schedules = []config.Schedule{
+		{Name: "bad", Dataset: "tank/a", Cron: "not-a-cron", Prefix: "p", Enabled: true},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected invalid cron error")
+	}
+}
+
+func TestValidateRejectsInvalidMaxAge(t *testing.T) {
+	cfg := config.Default()
+	cfg.Schedules = []config.Schedule{
+		{Name: "bad", Dataset: "tank/a", Cron: "0 * * * *", Prefix: "p", Enabled: true,
+			Retention: config.Retention{MaxAge: "nope"}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected invalid max_age error")
+	}
+}
+
+func TestValidateRejectsBadScheduleName(t *testing.T) {
+	cfg := config.Default()
+	cfg.Schedules = []config.Schedule{
+		{Name: "has space", Dataset: "tank/a", Cron: "0 * * * *", Prefix: "p", Enabled: true},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected invalid name error")
+	}
+}
+
+func TestValidateEmptySchedulesOK(t *testing.T) {
+	cfg := config.Default()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFindSchedule(t *testing.T) {
 	cfg := config.Default()
 	cfg.Schedules = []config.Schedule{{Name: "hourly", Dataset: "tank/a", Cron: "0 * * * *", Prefix: "p", Enabled: true}}

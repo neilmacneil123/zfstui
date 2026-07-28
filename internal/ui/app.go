@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,8 @@ type Deps struct {
 	Z       zfs.Client
 	DryRun  bool
 	Binary  string
+	// ZFSErr is set when zfs is unavailable at startup (status banner).
+	ZFSErr error
 }
 
 // SetDryRun updates the session dry-run flag and propagates to *zfs.CLI when present.
@@ -85,6 +88,9 @@ func Run(cfgPath string, cfg *config.Config, z zfs.Client, dryRun bool) error {
 		Binary:  binaryPath(),
 	}
 	d.SetDryRun(dryRun)
+	if z != nil {
+		d.ZFSErr = z.Available(context.Background())
+	}
 
 	m := NewApp(d)
 	p := tea.NewProgram(m, tea.WithAltScreen())
@@ -94,11 +100,18 @@ func Run(cfgPath string, cfg *config.Config, z zfs.Client, dryRun bool) error {
 
 // NewApp constructs the root model at the home screen.
 func NewApp(d *Deps) App {
+	status := "Ready"
+	statusErr := false
+	if d != nil && d.ZFSErr != nil {
+		status = "zfs unavailable: " + d.ZFSErr.Error()
+		statusErr = true
+	}
 	return App{
-		deps:   d,
-		home:   screens.NewHome(),
-		screen: screenHome,
-		status: "Ready",
+		deps:      d,
+		home:      screens.NewHome(),
+		screen:    screenHome,
+		status:    status,
+		statusErr: statusErr,
 	}
 }
 
@@ -214,6 +227,10 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case screenSchedules:
 			var cmd tea.Cmd
 			m.schedules, cmd = m.schedules.Update(msg)
+			return m, cmd
+		case screenCrontab:
+			var cmd tea.Cmd
+			m.crontab, cmd = m.crontab.Update(msg)
 			return m, cmd
 		}
 		return m, nil
@@ -334,6 +351,9 @@ func (m App) inputCaptured() bool {
 		return true
 	}
 	if m.screen == screenSchedules && m.schedules.InputCaptured() {
+		return true
+	}
+	if m.screen == screenCrontab && m.crontab.InputCaptured() {
 		return true
 	}
 	return false
@@ -660,12 +680,19 @@ func (m App) viewHelpBar() string {
 			}
 		}
 	case screenCrontab:
-		hints = []string{
-			HelpHint("i", "install"),
-			HelpHint("u", "uninstall"),
-			HelpHint("r", "refresh"),
-			HelpHint("esc", "back"),
-			HelpHint("q", "quit"),
+		if m.crontab.Confirm.Active {
+			hints = []string{
+				HelpHint("y/n", "confirm"),
+				HelpHint("esc", "cancel"),
+			}
+		} else {
+			hints = []string{
+				HelpHint("i", "install"),
+				HelpHint("u", "uninstall"),
+				HelpHint("r", "refresh"),
+				HelpHint("esc", "back"),
+				HelpHint("q", "quit"),
+			}
 		}
 	case screenPlaceholder:
 		hints = []string{

@@ -101,6 +101,8 @@ schedules:
 | Both | Never delete among newest N; among the rest drop older than D |
 | Neither | No prune |
 
+**Recursive schedules:** when `recursive: true`, create uses `zfs snapshot -r`, but prune only destroys matching snapshots on the **schedule dataset itself** (not child datasets). Manage child retention with separate schedules if needed.
+
 ## Cron install
 
 Schedules are installed as **managed** crontab content (marker block or `/etc/cron.d/zfstui`).
@@ -161,7 +163,7 @@ zfstui --dry-run run --schedule hourly-home
 ## Safety notes
 
 - **Dry-run first.** Use `--dry-run` or `D` in the TUI before live rollback/destroy/cron install.
-- **Rollback is destructive.** Newer snapshots on that dataset (and their deltas) are destroyed. The wizard lists them and requires typing the **dataset name**.
+- **Rollback is destructive.** Newer snapshots on that dataset (and their deltas) are destroyed. The wizard lists them and requires typing the **dataset name**. When newer snapshots exist, rollback uses `zfs rollback -r` automatically.
 - **Destroy** requires typing the short snapshot name (after `@`).
 - **Clone** is safer for exploration; optional **promote** detaches the clone from the origin snapshot.
 - **Privileges:** many `zfs` operations need root or delegated permissions; cron system install needs write access to `/etc/cron.d`.

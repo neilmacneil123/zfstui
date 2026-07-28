@@ -2,6 +2,7 @@ package cron
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/zfstui/zfstui/internal/config"
@@ -20,6 +21,8 @@ func RenderSystem(cfg *config.Config, binary, configPath string) (string, error)
 	b.WriteString(SystemHeader + "\n")
 	b.WriteString("SHELL=/bin/sh\n")
 	b.WriteString("PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n\n")
+	qBin := strconv.Quote(binary)
+	qCfg := strconv.Quote(configPath)
 	for _, s := range cfg.Schedules {
 		if !s.Enabled {
 			continue
@@ -27,7 +30,7 @@ func RenderSystem(cfg *config.Config, binary, configPath string) (string, error)
 		if err := schedule.ValidateCron(s.Cron); err != nil {
 			return "", fmt.Errorf("schedule %q: %w", s.Name, err)
 		}
-		fmt.Fprintf(&b, "%s root %s run --config %s --schedule %s\n", s.Cron, binary, configPath, s.Name)
+		fmt.Fprintf(&b, "%s root %s run --config %s --schedule %s\n", s.Cron, qBin, qCfg, s.Name)
 	}
 	return b.String(), nil
 }
@@ -35,6 +38,8 @@ func RenderSystem(cfg *config.Config, binary, configPath string) (string, error)
 func RenderUserBlock(cfg *config.Config, binary, configPath string) (string, error) {
 	var b strings.Builder
 	b.WriteString(BeginMarker + "\n")
+	qBin := strconv.Quote(binary)
+	qCfg := strconv.Quote(configPath)
 	for _, s := range cfg.Schedules {
 		if !s.Enabled {
 			continue
@@ -43,7 +48,7 @@ func RenderUserBlock(cfg *config.Config, binary, configPath string) (string, err
 			return "", fmt.Errorf("schedule %q: %w", s.Name, err)
 		}
 		// user crontab: no user field
-		fmt.Fprintf(&b, "%s %s run --config %s --schedule %s\n", s.Cron, binary, configPath, s.Name)
+		fmt.Fprintf(&b, "%s %s run --config %s --schedule %s\n", s.Cron, qBin, qCfg, s.Name)
 	}
 	b.WriteString(EndMarker + "\n")
 	return b.String(), nil

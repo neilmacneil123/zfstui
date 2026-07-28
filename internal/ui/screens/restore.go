@@ -155,7 +155,8 @@ func (r Restore) updateRollback(msg tea.KeyMsg) (Restore, tea.Cmd) {
 		}
 		r.Active = false
 		snap := r.Snapshot
-		rec := r.Recursive
+		// zfs rollback without -R/-r fails when newer snapshots exist; force recursive.
+		rec := r.Recursive || len(r.newer) > 0
 		return r, func() tea.Msg {
 			return RestoreRequestMsg{
 				Op:        "rollback",
@@ -319,8 +320,8 @@ func (r Restore) View() string {
 		lines = append(lines, "")
 		lines = append(lines, bodyStyle.Render("Will roll back to:"))
 		lines = append(lines, accent.Render("  "+r.Snapshot))
-		if r.Recursive {
-			lines = append(lines, muted.Render("  (recursive)"))
+		if r.Recursive || len(r.newer) > 0 {
+			lines = append(lines, muted.Render("  (recursive -r; required when newer snapshots exist)"))
 		}
 		lines = append(lines, "")
 		if len(r.newer) == 0 {

@@ -241,6 +241,13 @@ func (f ScheduleForm) Validate() (config.Schedule, error) {
 	if name == "" {
 		return config.Schedule{}, fmt.Errorf("name is required")
 	}
+	for _, r := range name {
+		ok := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') ||
+			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-'
+		if !ok {
+			return config.Schedule{}, fmt.Errorf("name must match [A-Za-z0-9._-]+")
+		}
+	}
 	if _, dup := f.taken[name]; dup {
 		return config.Schedule{}, fmt.Errorf("duplicate schedule name %q", name)
 	}
