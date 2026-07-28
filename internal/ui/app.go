@@ -42,6 +42,8 @@ const (
 	screenHelp
 	screenDatasets
 	screenSnapshots
+	screenSchedules
+	screenCrontab
 )
 
 // clearStatusMsg clears a transient error status after a delay.
@@ -60,8 +62,10 @@ type App struct {
 	home       screens.Home
 	datasets   screens.Datasets
 	snapshots  screens.Snapshots
+	schedules  screens.Schedules
+	crontab    screens.Crontab
 
-	// Placeholder screen (Task 11 will replace remaining stubs).
+	// Placeholder screen for future stubs.
 	placeholderTitle string
 	placeholderBody  string
 
@@ -115,6 +119,10 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.datasets.Height = msg.Height
 		m.snapshots.Width = msg.Width
 		m.snapshots.Height = msg.Height
+		m.schedules.Width = msg.Width
+		m.schedules.Height = msg.Height
+		m.crontab.Width = msg.Width
+		m.crontab.Height = msg.Height
 		return m, nil
 
 	case screens.SelectMsg:
@@ -183,12 +191,47 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, screens.DestroySnapshotCmd(m.deps.Z, msg.FullName, msg.Recursive)
 
 	case screens.ConfirmResultMsg:
-		if m.screen == screenSnapshots {
+		switch m.screen {
+		case screenSnapshots:
 			var cmd tea.Cmd
 			m.snapshots, cmd = m.snapshots.Update(msg)
 			return m, cmd
+		case screenSchedules:
+			var cmd tea.Cmd
+			m.schedules, cmd = m.schedules.Update(msg)
+			return m, cmd
 		}
 		return m, nil
+
+	case screens.ScheduleFormResultMsg:
+		var cmd tea.Cmd
+		m.schedules, cmd = m.schedules.Update(msg)
+		return m, cmd
+
+	case screens.SchedulesStatusMsg:
+		m.setStatus(msg.Text, msg.IsErr)
+		return m, m.maybeClearErrCmd(msg.IsErr)
+
+	case screens.SchedulesBackMsg:
+		m.screen = screenHome
+		m.navPath = ""
+		m.setStatus("Home", false)
+		return m, nil
+
+	case screens.CrontabStatusMsg:
+		m.setStatus(msg.Text, msg.IsErr)
+		return m, m.maybeClearErrCmd(msg.IsErr)
+
+	case screens.CrontabBackMsg:
+		m.screen = screenHome
+		m.navPath = ""
+		m.setStatus("Home", false)
+		return m, nil
+
+	case screens.CrontabOpDoneMsg:
+		var cmd tea.Cmd
+		m.crontab, cmd = m.crontab.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		if m.shouldGlobalQuit(msg) {
@@ -238,6 +281,16 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.snapshots, cmd = m.snapshots.Update(msg)
 			return m, cmd
+		case screenSchedules:
+			var cmd tea.Cmd
+			m.schedules, cmd = m.schedules.Update(msg)
+			return m, cmd
+		case screenCrontab:
+			// Keep dry-run flag in sync with session toggle.
+			m.crontab.SetDryRun(m.deps.DryRun)
+			var cmd tea.Cmd
+			m.crontab, cmd = m.crontab.Update(msg)
+			return m, cmd
 		case screenPlaceholder:
 			if key.Matches(msg, Keys.Back) {
 				m.screen = screenHome
@@ -263,6 +316,9 @@ func (m App) inputCaptured() bool {
 		return true
 	}
 	if m.screen == screenSnapshots && m.snapshots.Confirm.Active {
+		return true
+	}
+	if m.screen == screenSchedules && m.schedules.InputCaptured() {
 		return true
 	}
 	return false
@@ -297,17 +353,23 @@ func (m App) handleSelect(action screens.MenuAction) (tea.Model, tea.Cmd) {
 		m.setStatus("Loading pools…", false)
 		return m, screens.LoadPoolsCmd(m.deps.Z)
 	case screens.ActionSchedules:
-		m.screen = screenPlaceholder
-		m.placeholderTitle = "Schedules"
-		m.placeholderBody = "Coming soon — manage snapshot schedules and retention.\n(Task 11 will wire this screen.)"
+		m.schedules = screens.NewSchedules(m.deps.Cfg, m.deps.CfgPath)
+		m.schedules.Width = m.width
+		m.schedules.Height = m.height
+		m.screen = screenSchedules
 		m.navPath = ""
-		m.setStatus("Schedules", false)
+		n := 0
+		if m.deps.Cfg != nil {
+			n = len(m.deps.Cfg.Schedules)
+		}
+		m.setStatus(fmt.Sprintf("%d schedule(s)", n), false)
 	case screens.ActionCrontab:
-		m.screen = screenPlaceholder
-		m.placeholderTitle = "Crontab"
-		m.placeholderBody = "Coming soon — install, preview, and sync cron entries.\n(Task 11 will wire this screen.)"
-		m.navPath = ""
-		m.setStatus("Crontab", false)
+		m.crontab = screens.NewCrontab(m.deps.Cfg, m.deps.CfgPath, m.deps.Binary, m.deps.DryRun)
+		m.crontab.Width = m.width
+		m.crontab.Height = m.height
+		m.screen = screenCrontab
+		m.navPath = m.crontab.ModeLabel()
+		m.setStatus("Crontab · "+m.crontab.ModeLabel(), false)
 	case screens.ActionToggleDryRun:
 		m.deps.SetDryRun(!m.deps.DryRun)
 		if m.deps.DryRun {
@@ -387,6 +449,10 @@ func (m App) View() string {
 		body = m.datasets.View()
 	case screenSnapshots:
 		body = m.snapshots.View()
+	case screenSchedules:
+		body = m.schedules.View()
+	case screenCrontab:
+		body = m.crontab.View()
 	}
 
 	status := m.viewStatusBar()
@@ -429,6 +495,14 @@ func (m App) viewHelp() string {
 		helpRow("/", "Filter datasets"),
 		helpRow("c", "Create snapshot"),
 		helpRow("d", "Destroy (typed confirm)"),
+		"",
+		MutedStyle.Render("Schedules:"),
+		helpRow("a / e / x", "Add / edit / delete"),
+		helpRow("space", "Toggle enabled"),
+		"",
+		MutedStyle.Render("Crontab:"),
+		helpRow("i / u", "Install / uninstall"),
+		helpRow("r", "Refresh preview"),
 		"",
 		MutedStyle.Render("Press esc or ? to close."),
 	}
@@ -513,6 +587,36 @@ func (m App) viewHelpBar() string {
 				HelpHint("esc", "back"),
 				HelpHint("q", "quit"),
 			}
+		}
+	case screenSchedules:
+		if m.schedules.Form.Active {
+			hints = []string{
+				HelpHint("tab", "fields"),
+				HelpHint("enter", "save"),
+				HelpHint("esc", "cancel"),
+			}
+		} else if m.schedules.Confirm.Active {
+			hints = []string{
+				HelpHint("y/n", "confirm"),
+				HelpHint("esc", "cancel"),
+			}
+		} else {
+			hints = []string{
+				HelpHint("j/k", "move"),
+				HelpHint("a", "add"),
+				HelpHint("e", "edit"),
+				HelpHint("x", "delete"),
+				HelpHint("space", "toggle"),
+				HelpHint("esc", "back"),
+			}
+		}
+	case screenCrontab:
+		hints = []string{
+			HelpHint("i", "install"),
+			HelpHint("u", "uninstall"),
+			HelpHint("r", "refresh"),
+			HelpHint("esc", "back"),
+			HelpHint("q", "quit"),
 		}
 	case screenPlaceholder:
 		hints = []string{

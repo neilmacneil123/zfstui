@@ -1,11 +1,15 @@
 package screens
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/zfstui/zfstui/internal/config"
 	"github.com/zfstui/zfstui/internal/zfs"
 )
 
@@ -130,5 +134,151 @@ func TestSnapshotsCreateDestroy(t *testing.T) {
 	done = DestroySnapshotCmd(f, dreq.FullName, false)().(SnapshotOpDoneMsg)
 	if done.Err != nil {
 		t.Fatal(done.Err)
+	}
+}
+
+func TestScheduleFormValidate(t *testing.T) {
+	defaults := config.Defaults{SnapshotPrefix: "zfstui", Recursive: false}
+	existing := []config.Schedule{{Name: "hourly", Dataset: "tank/a", Cron: "0 * * * *", Prefix: "zfstui", Enabled: true}}
+
+	f := NewScheduleFormAdd(defaults, existing)
+	f.fields[fieldName] = "hourly"
+	f.fields[fieldDataset] = "tank/b"
+	f.fields[fieldCron] = "0 * * * *"
+	if _, err := f.Validate(); err == nil {
+		t.Fatal("expected duplicate name error")
+	}
+
+	f.fields[fieldName] = "daily"
+	f.fields[fieldCron] = "not-a-cron"
+	if _, err := f.Validate(); err == nil {
+		t.Fatal("expected bad cron error")
+	}
+
+	f.fields[fieldCron] = "30 2 * * *"
+	f.fields[fieldKeepLast] = "abc"
+	if _, err := f.Validate(); err == nil {
+		t.Fatal("expected keep_last parse error")
+	}
+
+	f.fields[fieldKeepLast] = "7"
+	f.fields[fieldMaxAge] = "nope"
+	if _, err := f.Validate(); err == nil {
+		t.Fatal("expected max_age error")
+	}
+
+	f.fields[fieldMaxAge] = "7d"
+	f.fields[fieldRecursive] = "true"
+	s, err := f.Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Name != "daily" || s.Dataset != "tank/b" || !s.Recursive || s.Retention.KeepLast == nil || *s.Retention.KeepLast != 7 || s.Retention.MaxAge != "7d" {
+		t.Fatalf("unexpected schedule: %#v", s)
+	}
+}
+
+func TestRetentionSummary(t *testing.T) {
+	keep := 24
+	s := config.Schedule{Retention: config.Retention{KeepLast: &keep, MaxAge: "7d"}}
+	if got := RetentionSummary(s); got != "keep 24, max 7d" {
+		t.Fatalf("got %q", got)
+	}
+	if got := RetentionSummary(config.Schedule{}); got != "—" {
+		t.Fatalf("empty: %q", got)
+	}
+}
+
+func TestSchedulesToggleAndSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := config.Default()
+	keep := 3
+	cfg.Schedules = []config.Schedule{{
+		Name: "s1", Dataset: "tank/home", Cron: "0 * * * *", Prefix: "zfstui",
+		Enabled: true, Retention: config.Retention{KeepLast: &keep},
+	}}
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	sc := NewSchedules(&cfg, path)
+	sc, cmd := sc.toggleEnabled()
+	if cmd == nil {
+		t.Fatal("expected status cmd")
+	}
+	msg := cmd().(SchedulesStatusMsg)
+	if msg.IsErr || !strings.Contains(msg.Text, "disabled") {
+		t.Fatalf("status: %#v", msg)
+	}
+	if cfg.Schedules[0].Enabled {
+		t.Fatal("expected disabled")
+	}
+	// reload from disk
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Schedules[0].Enabled {
+		t.Fatal("disk still enabled")
+	}
+}
+
+func TestSchedulesAddViaForm(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := config.Default()
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	sc := NewSchedules(&cfg, path)
+	sc, _ = sc.beginAdd()
+	if !sc.Form.Active {
+		t.Fatal("form should be active")
+	}
+	// fill required fields
+	sc.Form.fields[fieldName] = "nightly"
+	sc.Form.fields[fieldDataset] = "tank/data"
+	sc.Form.fields[fieldCron] = "0 3 * * *"
+	sc.Form.fields[fieldPrefix] = "zfstui"
+	form, cmd := sc.Form.trySave()
+	sc.Form = form
+	if sc.Form.Active {
+		t.Fatalf("form should close: err=%s", sc.Form.err)
+	}
+	res := cmd().(ScheduleFormResultMsg)
+	sc, cmd = sc.Update(res)
+	if cmd == nil {
+		t.Fatal("expected status")
+	}
+	st := cmd().(SchedulesStatusMsg)
+	if st.IsErr {
+		t.Fatal(st.Text)
+	}
+	if len(cfg.Schedules) != 1 || cfg.Schedules[0].Name != "nightly" {
+		t.Fatalf("schedules: %#v", cfg.Schedules)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCrontabDryRunInstall(t *testing.T) {
+	cfg := config.Default()
+	cfg.Schedules = []config.Schedule{{
+		Name: "s1", Dataset: "tank/home", Cron: "0 * * * *", Prefix: "zfstui", Enabled: true,
+	}}
+	c := NewCrontab(&cfg, "/tmp/cfg.yaml", "/usr/bin/zfstui", true)
+	if c.preview == "" && c.previewErr != "" {
+		t.Fatalf("preview err: %s", c.previewErr)
+	}
+	c, cmd := c.beginInstall()
+	msg := cmd().(CrontabStatusMsg)
+	if msg.IsErr || !strings.Contains(msg.Text, "dry-run") {
+		t.Fatalf("expected dry-run status, got %#v", msg)
+	}
+	if c.busy {
+		t.Fatal("dry-run must not set busy")
 	}
 }
