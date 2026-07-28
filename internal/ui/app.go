@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -39,7 +40,14 @@ const (
 	screenHome screenKind = iota
 	screenPlaceholder
 	screenHelp
+	screenDatasets
+	screenSnapshots
 )
+
+// clearStatusMsg clears a transient error status after a delay.
+type clearStatusMsg struct {
+	Token int
+}
 
 // App is the root Bubble Tea model: chrome + screen navigation.
 type App struct {
@@ -47,14 +55,20 @@ type App struct {
 	width  int
 	height int
 
-	screen screenKind
-	home   screens.Home
+	screen     screenKind
+	prevScreen screenKind // restored when help closes
+	home       screens.Home
+	datasets   screens.Datasets
+	snapshots  screens.Snapshots
 
-	// Placeholder screen (Tasks 10–11 will replace these).
+	// Placeholder screen (Task 11 will replace remaining stubs).
 	placeholderTitle string
 	placeholderBody  string
 
-	status string // transient status line
+	status    string // transient status line
+	statusErr bool   // render status in red
+	navPath   string // pool/dataset breadcrumb
+	statusTok int    // token to cancel delayed clear
 }
 
 // Run launches the TUI. This is the entry point wired to cli.StartTUI.
@@ -66,7 +80,6 @@ func Run(cfgPath string, cfg *config.Config, z zfs.Client, dryRun bool) error {
 		DryRun:  dryRun,
 		Binary:  binaryPath(),
 	}
-	// Keep CLI dry-run in sync with the session flag.
 	d.SetDryRun(dryRun)
 
 	m := NewApp(d)
@@ -98,56 +111,139 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.home.Width = msg.Width
 		m.home.Height = msg.Height
+		m.datasets.Width = msg.Width
+		m.datasets.Height = msg.Height
+		m.snapshots.Width = msg.Width
+		m.snapshots.Height = msg.Height
 		return m, nil
 
 	case screens.SelectMsg:
 		return m.handleSelect(msg.Action)
 
+	case clearStatusMsg:
+		if msg.Token == m.statusTok && m.statusErr {
+			m.status = "Ready"
+			m.statusErr = false
+		}
+		return m, nil
+
+	case screens.PoolsLoadedMsg, screens.DatasetsLoadedMsg:
+		var cmd tea.Cmd
+		m.datasets, cmd = m.datasets.Update(msg)
+		return m, cmd
+
+	case screens.DatasetsStatusMsg:
+		m.setStatus(msg.Text, msg.IsErr)
+		if msg.Path != "" || !msg.IsErr {
+			m.navPath = msg.Path
+		}
+		return m, m.maybeClearErrCmd(msg.IsErr)
+
+	case screens.DatasetsBackMsg:
+		m.screen = screenHome
+		m.navPath = ""
+		m.setStatus("Home", false)
+		return m, nil
+
+	case screens.OpenPoolMsg:
+		m.navPath = msg.Pool
+		m.setStatus("Loading datasets…", false)
+		return m, screens.LoadDatasetsCmd(m.deps.Z, msg.Pool)
+
+	case screens.ReloadPoolsMsg:
+		m.navPath = ""
+		m.setStatus("Loading pools…", false)
+		return m, screens.LoadPoolsCmd(m.deps.Z)
+
+	case screens.OpenSnapshotsMsg:
+		return m.openSnapshots(msg.Dataset)
+
+	case screens.SnapshotsLoadedMsg:
+		var cmd tea.Cmd
+		m.snapshots, cmd = m.snapshots.Update(msg)
+		return m, cmd
+
+	case screens.SnapshotsStatusMsg:
+		m.setStatus(msg.Text, msg.IsErr)
+		if msg.Path != "" {
+			m.navPath = msg.Path
+		}
+		return m, m.maybeClearErrCmd(msg.IsErr)
+
+	case screens.SnapshotOpDoneMsg:
+		return m.handleSnapshotOpDone(msg)
+
+	case screens.SnapshotsBackMsg:
+		return m.backFromSnapshots(msg.Dataset)
+
+	case screens.CreateSnapshotRequestMsg:
+		return m, screens.CreateSnapshotCmd(m.deps.Z, msg.FullName, msg.Recursive)
+
+	case screens.DestroySnapshotRequestMsg:
+		return m, screens.DestroySnapshotCmd(m.deps.Z, msg.FullName, msg.Recursive)
+
+	case screens.ConfirmResultMsg:
+		if m.screen == screenSnapshots {
+			var cmd tea.Cmd
+			m.snapshots, cmd = m.snapshots.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
 	case tea.KeyMsg:
-		// Always-on quit (ctrl+c and q).
-		if key.Matches(msg, Keys.Quit) {
+		if m.shouldGlobalQuit(msg) {
 			return m, tea.Quit
 		}
 
-		// Help overlay: ? / esc closes; other keys ignored.
 		if m.screen == screenHelp {
 			if key.Matches(msg, Keys.Help) || key.Matches(msg, Keys.Back) {
-				m.screen = screenHome
+				m.screen = m.prevScreen
 			}
 			return m, nil
 		}
 
-		// Global keys available on every screen.
-		switch {
-		case key.Matches(msg, Keys.Help):
-			m.screen = screenHelp
-			return m, nil
+		if !m.inputCaptured() {
+			switch {
+			case key.Matches(msg, Keys.Help):
+				m.prevScreen = m.screen
+				m.screen = screenHelp
+				return m, nil
 
-		case key.Matches(msg, Keys.DryRun):
-			m.deps.SetDryRun(!m.deps.DryRun)
-			if m.deps.DryRun {
-				m.status = "Dry-run enabled — mutations are simulated"
-			} else {
-				m.status = "Dry-run disabled — live mode"
-			}
-			return m, nil
-
-		case key.Matches(msg, Keys.Back):
-			if m.screen != screenHome {
-				m.screen = screenHome
-				m.status = "Home"
+			case key.Matches(msg, Keys.DryRun):
+				m.deps.SetDryRun(!m.deps.DryRun)
+				if m.deps.DryRun {
+					m.setStatus("Dry-run enabled — mutations are simulated", false)
+				} else {
+					m.setStatus("Dry-run disabled — live mode", false)
+				}
 				return m, nil
 			}
 		}
 
-		// Screen-specific input.
+		// Any key dismisses red error styling (text remains until replaced).
+		if m.statusErr {
+			m.statusErr = false
+		}
+
 		switch m.screen {
 		case screenHome:
 			var cmd tea.Cmd
 			m.home, cmd = m.home.Update(msg)
 			return m, cmd
+		case screenDatasets:
+			var cmd tea.Cmd
+			m.datasets, cmd = m.datasets.Update(msg)
+			return m, cmd
+		case screenSnapshots:
+			var cmd tea.Cmd
+			m.snapshots, cmd = m.snapshots.Update(msg)
+			return m, cmd
 		case screenPlaceholder:
-			// Only navigation/global keys matter; already handled.
+			if key.Matches(msg, Keys.Back) {
+				m.screen = screenHome
+				m.navPath = ""
+				m.setStatus("Home", false)
+			}
 			return m, nil
 		}
 	}
@@ -155,29 +251,69 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m App) shouldGlobalQuit(msg tea.KeyMsg) bool {
+	if m.inputCaptured() {
+		return key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c")))
+	}
+	return key.Matches(msg, Keys.Quit)
+}
+
+func (m App) inputCaptured() bool {
+	if m.screen == screenDatasets && m.datasets.IsFiltering() {
+		return true
+	}
+	if m.screen == screenSnapshots && m.snapshots.Confirm.Active {
+		return true
+	}
+	return false
+}
+
+func (m *App) setStatus(text string, isErr bool) {
+	m.status = text
+	m.statusErr = isErr
+	if isErr {
+		m.statusTok++
+	}
+}
+
+func (m App) maybeClearErrCmd(isErr bool) tea.Cmd {
+	if !isErr {
+		return nil
+	}
+	tok := m.statusTok
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+		return clearStatusMsg{Token: tok}
+	})
+}
+
 func (m App) handleSelect(action screens.MenuAction) (tea.Model, tea.Cmd) {
 	switch action {
 	case screens.ActionPools:
-		m.screen = screenPlaceholder
-		m.placeholderTitle = "Pools & Datasets"
-		m.placeholderBody = "Coming soon — browse pools, datasets, and snapshots.\n(Task 10 will wire this screen.)"
-		m.status = "Pools & Datasets"
+		m.screen = screenDatasets
+		m.datasets = screens.NewDatasets()
+		m.datasets.Width = m.width
+		m.datasets.Height = m.height
+		m.navPath = ""
+		m.setStatus("Loading pools…", false)
+		return m, screens.LoadPoolsCmd(m.deps.Z)
 	case screens.ActionSchedules:
 		m.screen = screenPlaceholder
 		m.placeholderTitle = "Schedules"
 		m.placeholderBody = "Coming soon — manage snapshot schedules and retention.\n(Task 11 will wire this screen.)"
-		m.status = "Schedules"
+		m.navPath = ""
+		m.setStatus("Schedules", false)
 	case screens.ActionCrontab:
 		m.screen = screenPlaceholder
 		m.placeholderTitle = "Crontab"
 		m.placeholderBody = "Coming soon — install, preview, and sync cron entries.\n(Task 11 will wire this screen.)"
-		m.status = "Crontab"
+		m.navPath = ""
+		m.setStatus("Crontab", false)
 	case screens.ActionToggleDryRun:
 		m.deps.SetDryRun(!m.deps.DryRun)
 		if m.deps.DryRun {
-			m.status = "Dry-run enabled — mutations are simulated"
+			m.setStatus("Dry-run enabled — mutations are simulated", false)
 		} else {
-			m.status = "Dry-run disabled — live mode"
+			m.setStatus("Dry-run disabled — live mode", false)
 		}
 	case screens.ActionQuit:
 		return m, tea.Quit
@@ -185,10 +321,57 @@ func (m App) handleSelect(action screens.MenuAction) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m App) openSnapshots(dataset string) (tea.Model, tea.Cmd) {
+	prefix := "zfstui"
+	rec := false
+	if m.deps.Cfg != nil {
+		if m.deps.Cfg.Defaults.SnapshotPrefix != "" {
+			prefix = m.deps.Cfg.Defaults.SnapshotPrefix
+		}
+		rec = m.deps.Cfg.Defaults.Recursive
+	}
+	m.snapshots = screens.NewSnapshots(dataset, prefix, rec)
+	m.snapshots.Width = m.width
+	m.snapshots.Height = m.height
+	m.screen = screenSnapshots
+	m.navPath = dataset
+	m.setStatus("Loading snapshots…", false)
+	return m, screens.LoadSnapshotsCmd(m.deps.Z, dataset)
+}
+
+func (m App) backFromSnapshots(dataset string) (tea.Model, tea.Cmd) {
+	pool := dataset
+	if i := strings.Index(dataset, "/"); i > 0 {
+		pool = dataset[:i]
+	}
+	m.screen = screenDatasets
+	m.datasets = screens.NewDatasets()
+	m.datasets.Width = m.width
+	m.datasets.Height = m.height
+	m.navPath = pool
+	m.setStatus("Loading datasets…", false)
+	return m, screens.LoadDatasetsCmd(m.deps.Z, pool)
+}
+
+func (m App) handleSnapshotOpDone(msg screens.SnapshotOpDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		m.snapshots.SetBusy(false)
+		m.setStatus(msg.Err.Error(), true)
+		return m, m.maybeClearErrCmd(true)
+	}
+	op := msg.Op
+	if op == "" {
+		op = "op"
+	}
+	m.setStatus(fmt.Sprintf("%s ok: %s", op, msg.Name), false)
+	m.snapshots.SetBusy(true)
+	m.snapshots.SetLoading(true)
+	return m, screens.LoadSnapshotsCmd(m.deps.Z, m.snapshots.Dataset)
+}
+
 // View implements tea.Model.
 func (m App) View() string {
 	if m.width == 0 {
-		// Before first WindowSizeMsg.
 		return MutedStyle.Render("loading…")
 	}
 
@@ -200,13 +383,16 @@ func (m App) View() string {
 		body = m.viewPlaceholder()
 	case screenHelp:
 		body = m.viewHelp()
+	case screenDatasets:
+		body = m.datasets.View()
+	case screenSnapshots:
+		body = m.snapshots.View()
 	}
 
 	status := m.viewStatusBar()
 	help := m.viewHelpBar()
 
-	// Layout: body fills remaining height above status + help bars.
-	chrome := 2 // status + help
+	chrome := 2
 	bodyHeight := m.height - chrome
 	if bodyHeight < 1 {
 		bodyHeight = 1
@@ -237,14 +423,12 @@ func (m App) viewHelp() string {
 		helpRow("esc", "Back / close help"),
 		helpRow("D", "Toggle dry-run (session)"),
 		helpRow("?", "Toggle this help"),
-		helpRow("q", "Quit (or back when nested)"),
+		helpRow("q", "Quit"),
 		"",
-		MutedStyle.Render("Context keys (later screens):"),
+		MutedStyle.Render("Pools & datasets:"),
+		helpRow("/", "Filter datasets"),
 		helpRow("c", "Create snapshot"),
-		helpRow("d", "Destroy (confirm)"),
-		helpRow("r", "Restore wizard"),
-		helpRow("s", "Jump to schedules"),
-		helpRow("/", "Filter lists"),
+		helpRow("d", "Destroy (typed confirm)"),
 		"",
 		MutedStyle.Render("Press esc or ? to close."),
 	}
@@ -262,14 +446,24 @@ func (m App) viewStatusBar() string {
 	if cfg == "" {
 		cfg = "(no config)"
 	} else {
-		cfg = shortenPath(cfg, max(12, m.width/3))
+		cfg = shortenPath(cfg, max(12, m.width/4))
 	}
 
-	left := fmt.Sprintf(" %s  %s ", mode, MutedStyle.Render("│"))
-	mid := MutedStyle.Render(" " + cfg + " ")
-	right := MutedStyle.Render(" " + m.status + " ")
+	pathPart := ""
+	if m.navPath != "" {
+		pathPart = " " + SubtitleStyle.Render(m.navPath) + " " + MutedStyle.Render("│")
+	}
 
-	// Build a full-width bar.
+	left := fmt.Sprintf(" %s  %s%s ", mode, MutedStyle.Render("│"), pathPart)
+	mid := MutedStyle.Render(" " + cfg + " ")
+
+	var right string
+	if m.statusErr {
+		right = DangerStyle.Render(" " + m.status + " ")
+	} else {
+		right = MutedStyle.Render(" " + m.status + " ")
+	}
+
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(mid) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
@@ -288,6 +482,37 @@ func (m App) viewHelpBar() string {
 			HelpHint("D", "dry-run"),
 			HelpHint("?", "help"),
 			HelpHint("q", "quit"),
+		}
+	case screenDatasets:
+		if m.datasets.IsFiltering() {
+			hints = []string{
+				HelpHint("type", "filter"),
+				HelpHint("enter", "apply"),
+				HelpHint("esc", "clear"),
+			}
+		} else {
+			hints = []string{
+				HelpHint("j/k", "move"),
+				HelpHint("enter", "open"),
+				HelpHint("/", "filter"),
+				HelpHint("esc", "back"),
+				HelpHint("q", "quit"),
+			}
+		}
+	case screenSnapshots:
+		if m.snapshots.Confirm.Active {
+			hints = []string{
+				HelpHint("y/n|type", "confirm"),
+				HelpHint("esc", "cancel"),
+			}
+		} else {
+			hints = []string{
+				HelpHint("j/k", "move"),
+				HelpHint("c", "create"),
+				HelpHint("d", "destroy"),
+				HelpHint("esc", "back"),
+				HelpHint("q", "quit"),
+			}
 		}
 	case screenPlaceholder:
 		hints = []string{
@@ -323,7 +548,6 @@ func shortenPath(p string, maxLen int) string {
 	if len(p) <= maxLen {
 		return p
 	}
-	// Keep basename with ellipsis prefix.
 	base := filepath.Base(p)
 	if len(base)+3 >= maxLen {
 		return "…" + base
