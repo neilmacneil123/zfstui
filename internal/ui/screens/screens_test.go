@@ -282,3 +282,117 @@ func TestCrontabDryRunInstall(t *testing.T) {
 		t.Fatal("dry-run must not set busy")
 	}
 }
+
+func TestRestoreWizardRollback(t *testing.T) {
+	snaps := []zfs.Snapshot{
+		{Name: "tank/home@a", Creation: time.Unix(1, 0).UTC()},
+		{Name: "tank/home@b", Creation: time.Unix(2, 0).UTC()},
+		{Name: "tank/home@c", Creation: time.Unix(3, 0).UTC()},
+	}
+	s := NewSnapshots("tank/home", "zfstui", false)
+	s.snaps = snaps
+	s.cursor = 0 // oldest @a — newer b,c destroyed on rollback
+
+	s, _ = s.beginRestore()
+	if !s.Restore.Active || len(s.Restore.newer) != 2 {
+		t.Fatalf("wizard: active=%v newer=%d", s.Restore.Active, len(s.Restore.newer))
+	}
+
+	// choose rollback
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if s.Restore.step != restoreStepRollback {
+		t.Fatalf("step: %d", s.Restore.step)
+	}
+
+	// wrong name stays open
+	for _, r := range "wrong" {
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !s.Restore.Active || cmd != nil {
+		t.Fatal("mismatch should not submit")
+	}
+
+	// type correct dataset
+	s.Restore.typeInput = ""
+	for _, r := range "tank/home" {
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if s.Restore.Active {
+		t.Fatal("expected closed after confirm")
+	}
+	req := cmd().(RestoreRequestMsg)
+	if req.Op != "rollback" || req.Snapshot != "tank/home@a" {
+		t.Fatalf("req: %#v", req)
+	}
+
+	f := zfs.NewFake()
+	done := RestoreCmd(f, req)().(RestoreOpDoneMsg)
+	if done.Err != nil {
+		t.Fatal(done.Err)
+	}
+	if len(f.Log) != 1 || f.Log[0] != "rollback tank/home@a" {
+		t.Fatalf("log: %v", f.Log)
+	}
+}
+
+func TestRestoreWizardClonePromote(t *testing.T) {
+	snaps := []zfs.Snapshot{
+		{Name: "tank/home@s1", Creation: time.Unix(1, 0).UTC()},
+	}
+	s := NewSnapshots("tank/home", "zfstui", false)
+	s.snaps = snaps
+	s.cursor = 0
+	s, _ = s.beginRestore()
+
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	if s.Restore.step != restoreStepClonePath {
+		t.Fatalf("step: %d", s.Restore.step)
+	}
+
+	// default path tank/home-restored — accept with enter
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if s.Restore.step != restoreStepClonePromo {
+		t.Fatalf("step after path: %d", s.Restore.step)
+	}
+
+	// promote yes
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if s.Restore.step != restoreStepCloneFinal || !s.Restore.promote {
+		t.Fatalf("after promote: step=%d promote=%v", s.Restore.step, s.Restore.promote)
+	}
+
+	// final confirm yes
+	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if s.Restore.Active {
+		t.Fatal("expected closed")
+	}
+	req := cmd().(RestoreRequestMsg)
+	if req.Op != "clone" || req.NewDataset != "tank/home-restored" || !req.Promote {
+		t.Fatalf("req: %#v", req)
+	}
+
+	f := zfs.NewFake()
+	done := RestoreCmd(f, req)().(RestoreOpDoneMsg)
+	if done.Err != nil {
+		t.Fatal(done.Err)
+	}
+	if len(f.Log) != 2 || f.Log[0] != "clone tank/home@s1 tank/home-restored" || f.Log[1] != "promote tank/home-restored" {
+		t.Fatalf("log: %v", f.Log)
+	}
+}
+
+func TestRestoreWizardCancel(t *testing.T) {
+	s := NewSnapshots("tank/home", "zfstui", false)
+	s.snaps = []zfs.Snapshot{{Name: "tank/home@s1", Creation: time.Unix(1, 0).UTC()}}
+	s, _ = s.beginRestore()
+	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if s.Restore.Active {
+		t.Fatal("should cancel")
+	}
+	st := cmd().(RestoreStatusMsg)
+	if st.IsErr || !strings.Contains(st.Text, "cancel") {
+		t.Fatalf("status: %#v", st)
+	}
+}

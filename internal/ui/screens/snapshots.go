@@ -69,6 +69,8 @@ type Snapshots struct {
 
 	// Confirm overlay (create / destroy).
 	Confirm Confirm
+	// Restore multi-step wizard.
+	Restore Restore
 }
 
 // SetBusy marks a mutation in flight (used by App after request msgs).
@@ -117,12 +119,18 @@ func DestroySnapshotCmd(z zfs.Client, fullName string, recursive bool) tea.Cmd {
 // Init implements tea.Model.
 func (s Snapshots) Init() tea.Cmd { return nil }
 
-// Update handles load results, confirm, and keys.
+// Update handles load results, confirm, restore wizard, and keys.
 func (s Snapshots) Update(msg tea.Msg) (Snapshots, tea.Cmd) {
 	// Confirm modal captures all input while active.
 	if s.Confirm.Active {
 		var cmd tea.Cmd
 		s.Confirm, cmd = s.Confirm.Update(msg)
+		return s, cmd
+	}
+	// Restore wizard captures all input while active.
+	if s.Restore.Active {
+		var cmd tea.Cmd
+		s.Restore, cmd = s.Restore.Update(msg)
 		return s, cmd
 	}
 
@@ -204,6 +212,8 @@ func (s Snapshots) updateKeys(msg tea.KeyMsg) (Snapshots, tea.Cmd) {
 		return s.beginCreate()
 	case key.Matches(msg, key.NewBinding(key.WithKeys("d"))):
 		return s.beginDestroy()
+	case key.Matches(msg, key.NewBinding(key.WithKeys("r"))):
+		return s.beginRestore()
 	}
 	return s, nil
 }
@@ -239,6 +249,16 @@ func (s Snapshots) beginDestroy() (Snapshots, tea.Cmd) {
 	return s, nil
 }
 
+func (s Snapshots) beginRestore() (Snapshots, tea.Cmd) {
+	if len(s.snaps) == 0 || s.cursor < 0 || s.cursor >= len(s.snaps) {
+		return s, snapStatus("no snapshot selected", true, s.Dataset)
+	}
+	full := s.snaps[s.cursor].Name
+	s.Restore = OpenRestore(full, s.snaps, s.RecursiveDefault)
+	s.Restore.Width = minInt(s.Width-4, 64)
+	return s, nil
+}
+
 func packCreateValue(full string, recursive bool) string {
 	flag := "0"
 	if recursive {
@@ -271,7 +291,7 @@ func (s Snapshots) View() string {
 	var b strings.Builder
 	b.WriteString(title.Render("◆ Snapshots"))
 	b.WriteString(accent.Render("  " + s.Dataset))
-	b.WriteString(muted.Render("  · c create · d destroy · esc back"))
+	b.WriteString(muted.Render("  · c create · d destroy · r restore · esc back"))
 	b.WriteString("\n\n")
 
 	if s.loading {
@@ -292,6 +312,10 @@ func (s Snapshots) View() string {
 	if s.Confirm.Active {
 		// Overlay confirm centered-ish under the list.
 		panel := s.Confirm.View()
+		return body + "\n\n" + lipgloss.NewStyle().PaddingLeft(2).Render(panel)
+	}
+	if s.Restore.Active {
+		panel := s.Restore.View()
 		return body + "\n\n" + lipgloss.NewStyle().PaddingLeft(2).Render(panel)
 	}
 	return body

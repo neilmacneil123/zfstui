@@ -190,6 +190,21 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screens.DestroySnapshotRequestMsg:
 		return m, screens.DestroySnapshotCmd(m.deps.Z, msg.FullName, msg.Recursive)
 
+	case screens.RestoreRequestMsg:
+		m.snapshots.SetBusy(true)
+		m.setStatus(fmt.Sprintf("%s…", msg.Op), false)
+		return m, screens.RestoreCmd(m.deps.Z, msg)
+
+	case screens.RestoreOpDoneMsg:
+		return m.handleRestoreOpDone(msg)
+
+	case screens.RestoreStatusMsg:
+		m.setStatus(msg.Text, msg.IsErr)
+		if msg.Path != "" {
+			m.navPath = msg.Path
+		}
+		return m, m.maybeClearErrCmd(msg.IsErr)
+
 	case screens.ConfirmResultMsg:
 		switch m.screen {
 		case screenSnapshots:
@@ -315,7 +330,7 @@ func (m App) inputCaptured() bool {
 	if m.screen == screenDatasets && m.datasets.IsFiltering() {
 		return true
 	}
-	if m.screen == screenSnapshots && m.snapshots.Confirm.Active {
+	if m.screen == screenSnapshots && (m.snapshots.Confirm.Active || m.snapshots.Restore.Active) {
 		return true
 	}
 	if m.screen == screenSchedules && m.schedules.InputCaptured() {
@@ -431,6 +446,30 @@ func (m App) handleSnapshotOpDone(msg screens.SnapshotOpDoneMsg) (tea.Model, tea
 	return m, screens.LoadSnapshotsCmd(m.deps.Z, m.snapshots.Dataset)
 }
 
+func (m App) handleRestoreOpDone(msg screens.RestoreOpDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		m.snapshots.SetBusy(false)
+		m.setStatus(msg.Err.Error(), true)
+		return m, m.maybeClearErrCmd(true)
+	}
+	op := msg.Op
+	if op == "" {
+		op = "restore"
+	}
+	detail := msg.Target
+	if detail == "" {
+		detail = msg.Snapshot
+	}
+	m.setStatus(fmt.Sprintf("%s ok: %s", op, detail), false)
+	m.snapshots.SetBusy(true)
+	m.snapshots.SetLoading(true)
+	ds := m.snapshots.Dataset
+	if msg.Path != "" {
+		ds = msg.Path
+	}
+	return m, screens.LoadSnapshotsCmd(m.deps.Z, ds)
+}
+
 // View implements tea.Model.
 func (m App) View() string {
 	if m.width == 0 {
@@ -495,6 +534,10 @@ func (m App) viewHelp() string {
 		helpRow("/", "Filter datasets"),
 		helpRow("c", "Create snapshot"),
 		helpRow("d", "Destroy (typed confirm)"),
+		"",
+		MutedStyle.Render("Snapshots:"),
+		helpRow("c / d", "Create / destroy"),
+		helpRow("r", "Restore wizard (rollback / clone)"),
 		"",
 		MutedStyle.Render("Schedules:"),
 		helpRow("a / e / x", "Add / edit / delete"),
@@ -579,11 +622,17 @@ func (m App) viewHelpBar() string {
 				HelpHint("y/n|type", "confirm"),
 				HelpHint("esc", "cancel"),
 			}
+		} else if m.snapshots.Restore.Active {
+			hints = []string{
+				HelpHint("step", "wizard"),
+				HelpHint("esc", "cancel"),
+			}
 		} else {
 			hints = []string{
 				HelpHint("j/k", "move"),
 				HelpHint("c", "create"),
 				HelpHint("d", "destroy"),
+				HelpHint("r", "restore"),
 				HelpHint("esc", "back"),
 				HelpHint("q", "quit"),
 			}
