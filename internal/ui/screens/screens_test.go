@@ -1,6 +1,7 @@
 package screens
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,80 @@ func TestLoadPoolsAndDatasets(t *testing.T) {
 	rows := d.visibleRows()
 	if len(rows) != 1 || rows[0] != "tank/home" {
 		t.Fatalf("filter rows: %v", rows)
+	}
+}
+
+func TestDatasetsListScrollsWithCursor(t *testing.T) {
+	// Terminal height small enough that only a subset of datasets fit.
+	// chrome = 5 (app status/help + title + blank + header); overflow reserves 1 for hint.
+	const termHeight = 12
+	const n = 40
+
+	ds := make([]zfs.Dataset, n)
+	for i := 0; i < n; i++ {
+		ds[i] = zfs.Dataset{
+			Name:       fmt.Sprintf("tank/ds-%02d", i),
+			Used:       "1G",
+			Avail:      "9G",
+			Type:       "filesystem",
+			Mountpoint: fmt.Sprintf("/tank/ds-%02d", i),
+		}
+	}
+
+	d := NewDatasets()
+	d.Height = termHeight
+	d.Width = 100
+	d, _ = d.Update(DatasetsLoadedMsg{Pool: "tank", Datasets: ds})
+
+	// At top: first row visible, last row not.
+	view := d.View()
+	if !strings.Contains(view, "tank/ds-00") {
+		t.Fatalf("expected first dataset in view:\n%s", view)
+	}
+	if strings.Contains(view, "tank/ds-39") {
+		t.Fatalf("did not expect last dataset at top of list:\n%s", view)
+	}
+	if d.offset != 0 {
+		t.Fatalf("offset at top: got %d", d.offset)
+	}
+
+	// Move cursor down past the viewport; selection and scroll window must follow.
+	page := d.listPageSize(n)
+	if page < 2 {
+		t.Fatalf("page size too small for test: %d", page)
+	}
+	for i := 0; i < page+3; i++ {
+		d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	}
+	if d.cursor != page+3 {
+		t.Fatalf("cursor: got %d want %d", d.cursor, page+3)
+	}
+	if d.offset == 0 {
+		t.Fatal("expected offset to advance when cursor leaves first page")
+	}
+
+	view = d.View()
+	selected := fmt.Sprintf("tank/ds-%02d", d.cursor)
+	if !strings.Contains(view, selected) {
+		t.Fatalf("selected %q must be visible after scroll (offset=%d):\n%s", selected, d.offset, view)
+	}
+	if strings.Contains(view, "tank/ds-00") {
+		t.Fatalf("first row should have scrolled off:\n%s", view)
+	}
+	if !strings.Contains(view, "showing") {
+		t.Fatalf("expected scroll position hint:\n%s", view)
+	}
+
+	// Wrap from last item back to first — offset resets.
+	d.cursor = n - 1
+	d = d.ensureCursorVisible()
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if d.cursor != 0 || d.offset != 0 {
+		t.Fatalf("wrap to top: cursor=%d offset=%d", d.cursor, d.offset)
+	}
+	view = d.View()
+	if !strings.Contains(view, "tank/ds-00") {
+		t.Fatalf("expected first dataset after wrap:\n%s", view)
 	}
 }
 

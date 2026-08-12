@@ -311,7 +311,7 @@ func (r Restore) View() string {
 		lines = append(lines, bodyStyle.Render("Choose restore mode:"))
 		lines = append(lines, "")
 		lines = append(lines, "  "+warn.Render("[r]")+"  Rollback  — restore in place (destroys newer snaps)")
-		lines = append(lines, "  "+warn.Render("[c]")+"  Clone     — new dataset from this snapshot")
+		lines = append(lines, "  "+warn.Render("[c]")+"  Clone     — new dataset from this snapshot (safe)")
 		lines = append(lines, "")
 		lines = append(lines, muted.Render("r/c select · esc cancel"))
 
@@ -378,7 +378,13 @@ func (r Restore) View() string {
 		lines = append(lines, "")
 		lines = append(lines, bodyStyle.Render("Clone to: "+accent.Render(r.pathInput)))
 		lines = append(lines, "")
-		lines = append(lines, muted.Render("Promote makes the clone independent of the origin snapshot."))
+		lines = append(lines, muted.Render("No (recommended): leave the original alone; clone depends on the snapshot."))
+		lines = append(lines, "")
+		lines = append(lines, warn.Render("Yes — reverses parent/child:"))
+		lines = append(lines, bodyStyle.Render("  · clone becomes independent origin"))
+		lines = append(lines, bodyStyle.Render("  · original becomes a clone of the new dataset"))
+		lines = append(lines, bodyStyle.Render("  · older snapshots move to the clone"))
+		lines = append(lines, muted.Render("  (not a rollback; live data is not rewritten)"))
 		lines = append(lines, "")
 		lines = append(lines, r.renderYesNo())
 		lines = append(lines, "")
@@ -394,6 +400,14 @@ func (r Restore) View() string {
 			promo = "yes"
 		}
 		lines = append(lines, bodyStyle.Render("Promote: ")+accent.Render(promo))
+		if r.promote {
+			lines = append(lines, "")
+			lines = append(lines, warn.Render("Promote will make "+r.Dataset+" a clone of "+r.pathInput))
+			lines = append(lines, warn.Render("and move older snapshots onto the new dataset."))
+		} else {
+			lines = append(lines, "")
+			lines = append(lines, muted.Render("Original dataset stays independent; only the new clone is created."))
+		}
 		lines = append(lines, "")
 		lines = append(lines, r.renderYesNo())
 		lines = append(lines, "")

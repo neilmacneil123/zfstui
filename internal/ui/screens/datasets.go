@@ -72,9 +72,16 @@ type Datasets struct {
 	pools    []zfs.Pool
 	datasets []zfs.Dataset
 	cursor   int
-	loading  bool
-	err      string
+	// offset is the first visible list row index (scroll window).
+	offset  int
+	loading bool
+	err     string
 }
+
+// Chrome lines reserved before data rows can paint:
+// app status+help (2) + title (1) + blank (1) + table header (1).
+// Height is the full terminal height (same value App receives).
+const datasetsChromeLines = 5
 
 // IsFiltering reports whether the filter input is active.
 func (d Datasets) IsFiltering() bool { return d.filtering }
@@ -120,6 +127,7 @@ func (d Datasets) Update(msg tea.Msg) (Datasets, tea.Cmd) {
 		d.pool = ""
 		d.pools = msg.Pools
 		d.cursor = 0
+		d.offset = 0
 		d.filter = ""
 		d.filtering = false
 		if msg.Err != nil {
@@ -135,6 +143,7 @@ func (d Datasets) Update(msg tea.Msg) (Datasets, tea.Cmd) {
 		d.pool = msg.Pool
 		d.datasets = msg.Datasets
 		d.cursor = 0
+		d.offset = 0
 		d.filter = ""
 		d.filtering = false
 		if msg.Err != nil {
@@ -159,19 +168,23 @@ func (d Datasets) updateFilter(msg tea.KeyMsg) (Datasets, tea.Cmd) {
 		d.filtering = false
 		d.filter = ""
 		d.cursor = 0
+		d.offset = 0
 		return d, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 		d.filtering = false
 		d.cursor = 0
+		d.offset = 0
 		return d, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
 		if len(d.filter) > 0 {
 			d.filter = d.filter[:len(d.filter)-1]
 			d.cursor = 0
+			d.offset = 0
 		}
 	case msg.Type == tea.KeyRunes:
 		d.filter += string(msg.Runes)
 		d.cursor = 0
+		d.offset = 0
 	}
 	return d, nil
 }
@@ -185,6 +198,7 @@ func (d Datasets) updateNav(msg tea.KeyMsg) (Datasets, tea.Cmd) {
 		} else if len(rows) > 0 {
 			d.cursor = len(rows) - 1
 		}
+		d = d.ensureCursorVisible()
 	case key.Matches(msg, key.NewBinding(key.WithKeys("down", "j"))):
 		if len(rows) == 0 {
 			// nothing
@@ -193,6 +207,7 @@ func (d Datasets) updateNav(msg tea.KeyMsg) (Datasets, tea.Cmd) {
 		} else {
 			d.cursor = 0
 		}
+		d = d.ensureCursorVisible()
 	case key.Matches(msg, key.NewBinding(key.WithKeys("/"))):
 		if d.level == levelDatasets {
 			d.filtering = true
@@ -204,6 +219,7 @@ func (d Datasets) updateNav(msg tea.KeyMsg) (Datasets, tea.Cmd) {
 			d.pool = ""
 			d.filter = ""
 			d.cursor = 0
+			d.offset = 0
 			d.loading = true
 			return d, func() tea.Msg { return ReloadPoolsMsg{} }
 		}
@@ -222,6 +238,73 @@ func (d Datasets) updateNav(msg tea.KeyMsg) (Datasets, tea.Cmd) {
 		return d, func() tea.Msg { return OpenSnapshotsMsg{Dataset: name} }
 	}
 	return d, nil
+}
+
+// listPageSize is how many data rows fit in the terminal viewport for n total rows.
+// When the list overflows, one line is reserved for the "showing N–M of T" hint.
+func (d Datasets) listPageSize(n int) int {
+	h := d.Height - datasetsChromeLines
+	if h < 1 {
+		h = 1
+	}
+	if n > h && h > 1 {
+		h-- // room for scrollHint
+	}
+	return h
+}
+
+// ensureCursorVisible adjusts offset so the cursor row stays on-screen.
+func (d Datasets) ensureCursorVisible() Datasets {
+	n := len(d.visibleRows())
+	page := d.listPageSize(n)
+	if n <= 0 {
+		d.offset = 0
+		d.cursor = 0
+		return d
+	}
+	if d.cursor < 0 {
+		d.cursor = 0
+	}
+	if d.cursor >= n {
+		d.cursor = n - 1
+	}
+	if d.offset < 0 {
+		d.offset = 0
+	}
+	if d.cursor < d.offset {
+		d.offset = d.cursor
+	}
+	if d.cursor >= d.offset+page {
+		d.offset = d.cursor - page + 1
+	}
+	maxOff := n - page
+	if maxOff < 0 {
+		maxOff = 0
+	}
+	if d.offset > maxOff {
+		d.offset = maxOff
+	}
+	return d
+}
+
+// windowBounds returns the half-open [start, end) range of rows to paint.
+func (d Datasets) windowBounds(n int) (start, end int) {
+	if n <= 0 {
+		return 0, 0
+	}
+	page := d.listPageSize(n)
+	start = d.offset
+	if start < 0 {
+		start = 0
+	}
+	if start >= n {
+		start = 0
+	}
+	end = start + page
+	if end > n {
+		end = n
+	}
+	return start, end
 }
 
 func statusCmd(text string, isErr bool, path string) tea.Cmd {
@@ -314,12 +397,16 @@ func (d Datasets) renderPools() string {
 	for _, p := range d.pools {
 		byName[p.Name] = p
 	}
+	start, end := d.windowBounds(len(rows))
 	var lines []string
 	lines = append(lines, header)
-	for i, name := range rows {
-		p := byName[name]
+	for i := start; i < end; i++ {
+		p := byName[rows[i]]
 		line := tableRow([]string{p.Name, p.Health, p.Size, p.Alloc}, []int{24, 10, 10, 10}, i == d.cursor)
 		lines = append(lines, line)
+	}
+	if start > 0 || end < len(rows) {
+		lines = append(lines, scrollHint(start, end, len(rows)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -344,10 +431,11 @@ func (d Datasets) renderDatasets() string {
 	for _, ds := range d.datasets {
 		byName[ds.Name] = ds
 	}
+	start, end := d.windowBounds(len(rows))
 	var lines []string
 	lines = append(lines, header)
-	for i, name := range rows {
-		ds := byName[name]
+	for i := start; i < end; i++ {
+		ds := byName[rows[i]]
 		line := tableRow(
 			[]string{ds.Name, ds.Used, ds.Avail, ds.Type, ds.Mountpoint},
 			[]int{36, 8, 8, 10, 20},
@@ -355,7 +443,15 @@ func (d Datasets) renderDatasets() string {
 		)
 		lines = append(lines, line)
 	}
+	if start > 0 || end < len(rows) {
+		lines = append(lines, scrollHint(start, end, len(rows)))
+	}
 	return strings.Join(lines, "\n")
+}
+
+func scrollHint(start, end, total int) string {
+	// 1-based range for humans: "showing 6–15 of 40"
+	return mutedLine(fmt.Sprintf("  showing %d–%d of %d", start+1, end, total))
 }
 
 // --- shared table helpers (used by snapshots too) ---

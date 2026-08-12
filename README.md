@@ -165,7 +165,7 @@ zfstui --dry-run run --schedule hourly-home
 - **Dry-run first.** Use `--dry-run` or `D` in the TUI before live rollback/destroy/cron install.
 - **Rollback is destructive.** Newer snapshots on that dataset (and their deltas) are destroyed. The wizard lists them and requires typing the **dataset name**. When newer snapshots exist, rollback uses `zfs rollback -r` automatically.
 - **Destroy** requires typing the short snapshot name (after `@`).
-- **Clone** is safer for exploration; optional **promote** detaches the clone from the origin snapshot.
+- **Clone** is safer for exploration (leave promote **No**). **Promote** reverses the relationship: the clone becomes the origin, the original becomes a dependent clone, and older snapshots move to the clone. It is not a rollback of live data.
 - **Privileges:** many `zfs` operations need root or delegated permissions; cron system install needs write access to `/etc/cron.d`.
 - **No daemon / no send-receive** in v1 — scheduling is plain cron invoking the CLI.
 - Unit tests use a fake ZFS client; they never touch real pools.
