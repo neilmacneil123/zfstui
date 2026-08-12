@@ -19,11 +19,10 @@ func TestRunScheduleCreatesAndPrunes(t *testing.T) {
 		name := "tank/home@zfstui-" + now.Add(-time.Duration(i+1)*time.Hour).Format("20060102-150405")
 		f.Snapshots = append(f.Snapshots, zfs.Snapshot{Name: name, Creation: now.Add(-time.Duration(i+1) * time.Hour)})
 	}
-	keep := 2
 	cfg := config.Default()
 	cfg.Schedules = []config.Schedule{{
 		Name: "hourly", Dataset: "tank/home", Cron: "0 * * * *", Prefix: "zfstui",
-		Enabled: true, Retention: config.Retention{KeepLast: &keep},
+		Enabled: true, Retention: config.Retention{Daily: 2},
 	}}
 	r := &app.Runner{Z: f, Now: func() time.Time { return now }}
 	created, pruned, err := r.RunSchedule(context.Background(), &cfg, "hourly")

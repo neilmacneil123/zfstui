@@ -17,8 +17,10 @@ import (
 var scheduleNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type Retention struct {
-	KeepLast *int  `yaml:"keep_last,omitempty"`
-	MaxAge   string `yaml:"max_age,omitempty"`
+	Daily   int `yaml:"daily,omitempty"`
+	Weekly  int `yaml:"weekly,omitempty"`
+	Monthly int `yaml:"monthly,omitempty"`
+	Yearly  int `yaml:"yearly,omitempty"`
 }
 
 type Schedule struct {
@@ -115,13 +117,17 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(s.Prefix) == "" {
 			return fmt.Errorf("schedule %q: prefix is required", s.Name)
 		}
-		if s.Retention.KeepLast != nil && *s.Retention.KeepLast < 0 {
-			return fmt.Errorf("schedule %q: keep_last must be >= 0", s.Name)
+		if s.Retention.Daily < 0 {
+			return fmt.Errorf("schedule %q: retention.daily must be >= 0", s.Name)
 		}
-		if strings.TrimSpace(s.Retention.MaxAge) != "" {
-			if _, err := schedule.ParseMaxAge(s.Retention.MaxAge); err != nil {
-				return fmt.Errorf("schedule %q: %w", s.Name, err)
-			}
+		if s.Retention.Weekly < 0 {
+			return fmt.Errorf("schedule %q: retention.weekly must be >= 0", s.Name)
+		}
+		if s.Retention.Monthly < 0 {
+			return fmt.Errorf("schedule %q: retention.monthly must be >= 0", s.Name)
+		}
+		if s.Retention.Yearly < 0 {
+			return fmt.Errorf("schedule %q: retention.yearly must be >= 0", s.Name)
 		}
 		key := s.Name
 		if _, ok := seen[key]; ok {

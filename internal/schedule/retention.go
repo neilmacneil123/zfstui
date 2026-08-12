@@ -2,8 +2,7 @@ package schedule
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
+	"sort"
 	"time"
 )
 
@@ -12,68 +11,81 @@ type SnapInfo struct {
 	Created time.Time
 }
 
-// SelectForDeletion returns snapshots that should be destroyed.
+type GFSRetention struct {
+	Daily   int
+	Weekly  int
+	Monthly int
+	Yearly  int
+}
+
+func (r GFSRetention) Enabled() bool {
+	return r.Daily > 0 || r.Weekly > 0 || r.Monthly > 0 || r.Yearly > 0
+}
+
+// SelectForDeletion returns snapshots that should be destroyed using classic GFS retention.
 // snaps must be sorted newest-first by Created. If not sorted, sort first.
-func SelectForDeletion(snaps []SnapInfo, keepLast *int, maxAge *time.Duration, now time.Time) []SnapInfo {
-	if len(snaps) == 0 {
+func SelectForDeletion(snaps []SnapInfo, retention GFSRetention, now time.Time) []SnapInfo {
+	if len(snaps) == 0 || !retention.Enabled() {
 		return nil
 	}
-	// copy and ensure newest first
 	items := append([]SnapInfo(nil), snaps...)
-	for i := 0; i < len(items); i++ {
-		for j := i + 1; j < len(items); j++ {
-			if items[j].Created.After(items[i].Created) {
-				items[i], items[j] = items[j], items[i]
-			}
-		}
-	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].Created.After(items[j].Created)
+	})
+
+	keep := map[string]struct{}{}
+	keepTierBuckets(items, keep, retention.Daily, now, bucketDay)
+	keepTierBuckets(items, keep, retention.Weekly, now, bucketWeek)
+	keepTierBuckets(items, keep, retention.Monthly, now, bucketMonth)
+	keepTierBuckets(items, keep, retention.Yearly, now, bucketYear)
 
 	var out []SnapInfo
-	for i, s := range items {
-		protected := keepLast != nil && i < *keepLast
-		if protected {
+	for _, s := range items {
+		if _, ok := keep[s.Name]; ok {
 			continue
 		}
-		if keepLast != nil && maxAge == nil {
-			// only keep_last: everything outside N is deleted
-			out = append(out, s)
-			continue
-		}
-		if maxAge != nil {
-			if now.Sub(s.Created) > *maxAge {
-				out = append(out, s)
-			}
-			// if only max_age and still young, keep
-			// if both and outside N but young, keep
-			continue
-		}
-		// neither rule: never reached if callers check; treat as keep all
+		out = append(out, s)
 	}
 	return out
 }
 
-func ParseMaxAge(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, fmt.Errorf("empty max_age")
+func keepTierBuckets(items []SnapInfo, keep map[string]struct{}, count int, now time.Time, bucketFn func(time.Time) string) {
+	if count <= 0 {
+		return
 	}
-	unit := s[len(s)-1]
-	numPart := s[:len(s)-1]
-	n, err := strconv.Atoi(numPart)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("invalid max_age %q", s)
+	seen := map[string]struct{}{}
+	for _, s := range items {
+		if s.Created.After(now) {
+			// future timestamps should still be eligible, but bucket ordering
+			// is driven by the list's sort order, so no special handling here.
+		}
+		bucket := bucketFn(s.Created.UTC())
+		if _, ok := seen[bucket]; ok {
+			continue
+		}
+		seen[bucket] = struct{}{}
+		keep[s.Name] = struct{}{}
+		if len(seen) >= count {
+			return
+		}
 	}
-	switch unit {
-	case 'h', 'H':
-		return time.Duration(n) * time.Hour, nil
-	case 'd', 'D':
-		return time.Duration(n) * 24 * time.Hour, nil
-	case 'w', 'W':
-		return time.Duration(n) * 7 * 24 * time.Hour, nil
-	case 'm', 'M':
-		// minutes — document as m for minutes (not months)
-		return time.Duration(n) * time.Minute, nil
-	default:
-		return 0, fmt.Errorf("invalid max_age unit in %q (use m/h/d/w)", s)
-	}
+}
+
+func bucketDay(t time.Time) string {
+	y, m, d := t.Date()
+	return fmt.Sprintf("%04d-%02d-%02d", y, int(m), d)
+}
+
+func bucketWeek(t time.Time) string {
+	y, w := t.ISOWeek()
+	return fmt.Sprintf("%04d-W%02d", y, w)
+}
+
+func bucketMonth(t time.Time) string {
+	y, m, _ := t.Date()
+	return fmt.Sprintf("%04d-%02d", y, int(m))
+}
+
+func bucketYear(t time.Time) string {
+	return fmt.Sprintf("%04d", t.Year())
 }

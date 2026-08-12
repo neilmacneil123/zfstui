@@ -301,18 +301,24 @@ func (s Schedules) renderTable() string {
 	return strings.Join(lines, "\n")
 }
 
-// RetentionSummary formats keep_last / max_age for the table. Exported for tests.
+// RetentionSummary formats GFS retention for the table. Exported for tests.
 func RetentionSummary(s config.Schedule) string {
 	return retentionSummary(s)
 }
 
 func retentionSummary(s config.Schedule) string {
 	var parts []string
-	if s.Retention.KeepLast != nil {
-		parts = append(parts, fmt.Sprintf("keep %d", *s.Retention.KeepLast))
+	if s.Retention.Daily > 0 {
+		parts = append(parts, fmt.Sprintf("D %d", s.Retention.Daily))
 	}
-	if s.Retention.MaxAge != "" {
-		parts = append(parts, "max "+s.Retention.MaxAge)
+	if s.Retention.Weekly > 0 {
+		parts = append(parts, fmt.Sprintf("W %d", s.Retention.Weekly))
+	}
+	if s.Retention.Monthly > 0 {
+		parts = append(parts, fmt.Sprintf("M %d", s.Retention.Monthly))
+	}
+	if s.Retention.Yearly > 0 {
+		parts = append(parts, fmt.Sprintf("Y %d", s.Retention.Yearly))
 	}
 	if len(parts) == 0 {
 		return "—"

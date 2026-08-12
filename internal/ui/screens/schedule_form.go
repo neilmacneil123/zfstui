@@ -20,8 +20,10 @@ const (
 	fieldCron
 	fieldPrefix
 	fieldRecursive
-	fieldKeepLast
-	fieldMaxAge
+	fieldDaily
+	fieldWeekly
+	fieldMonthly
+	fieldYearly
 	fieldCount
 )
 
@@ -31,8 +33,10 @@ var formFieldLabels = []string{
 	"cron",
 	"prefix",
 	"recursive",
-	"keep_last",
-	"max_age",
+	"daily",
+	"weekly",
+	"monthly",
+	"yearly",
 }
 
 // ScheduleForm is a multi-field editor for one schedule (add or edit).
@@ -83,10 +87,18 @@ func NewScheduleFormEdit(idx int, s config.Schedule, defaults config.Defaults, e
 		f.fields[fieldPrefix] = defaults.SnapshotPrefix
 	}
 	f.fields[fieldRecursive] = boolStr(s.Recursive)
-	if s.Retention.KeepLast != nil {
-		f.fields[fieldKeepLast] = strconv.Itoa(*s.Retention.KeepLast)
+	if s.Retention.Daily > 0 {
+		f.fields[fieldDaily] = strconv.Itoa(s.Retention.Daily)
 	}
-	f.fields[fieldMaxAge] = s.Retention.MaxAge
+	if s.Retention.Weekly > 0 {
+		f.fields[fieldWeekly] = strconv.Itoa(s.Retention.Weekly)
+	}
+	if s.Retention.Monthly > 0 {
+		f.fields[fieldMonthly] = strconv.Itoa(s.Retention.Monthly)
+	}
+	if s.Retention.Yearly > 0 {
+		f.fields[fieldYearly] = strconv.Itoa(s.Retention.Yearly)
+	}
 	return f
 }
 
@@ -234,8 +246,6 @@ func (f ScheduleForm) Validate() (config.Schedule, error) {
 	dataset := strings.TrimSpace(f.fields[fieldDataset])
 	cronExpr := strings.TrimSpace(f.fields[fieldCron])
 	prefix := strings.TrimSpace(f.fields[fieldPrefix])
-	keepStr := strings.TrimSpace(f.fields[fieldKeepLast])
-	maxAge := strings.TrimSpace(f.fields[fieldMaxAge])
 	recursive := f.fields[fieldRecursive] == "true"
 
 	if name == "" {
@@ -267,22 +277,33 @@ func (f ScheduleForm) Validate() (config.Schedule, error) {
 		return config.Schedule{}, fmt.Errorf("prefix is required")
 	}
 
-	var ret config.Retention
-	if keepStr != "" {
-		n, err := strconv.Atoi(keepStr)
+	parseCount := func(label, raw string) (int, error) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return 0, nil
+		}
+		n, err := strconv.Atoi(raw)
 		if err != nil {
-			return config.Schedule{}, fmt.Errorf("keep_last must be an integer")
+			return 0, fmt.Errorf("%s must be an integer", label)
 		}
 		if n < 0 {
-			return config.Schedule{}, fmt.Errorf("keep_last must be >= 0")
+			return 0, fmt.Errorf("%s must be >= 0", label)
 		}
-		ret.KeepLast = &n
+		return n, nil
 	}
-	if maxAge != "" {
-		if _, err := schedule.ParseMaxAge(maxAge); err != nil {
-			return config.Schedule{}, err
-		}
-		ret.MaxAge = maxAge
+	var ret config.Retention
+	var err error
+	if ret.Daily, err = parseCount("daily", f.fields[fieldDaily]); err != nil {
+		return config.Schedule{}, err
+	}
+	if ret.Weekly, err = parseCount("weekly", f.fields[fieldWeekly]); err != nil {
+		return config.Schedule{}, err
+	}
+	if ret.Monthly, err = parseCount("monthly", f.fields[fieldMonthly]); err != nil {
+		return config.Schedule{}, err
+	}
+	if ret.Yearly, err = parseCount("yearly", f.fields[fieldYearly]); err != nil {
+		return config.Schedule{}, err
 	}
 
 	return config.Schedule{

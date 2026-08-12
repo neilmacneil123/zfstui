@@ -231,32 +231,33 @@ func TestScheduleFormValidate(t *testing.T) {
 	}
 
 	f.fields[fieldCron] = "30 2 * * *"
-	f.fields[fieldKeepLast] = "abc"
+	f.fields[fieldDaily] = "abc"
 	if _, err := f.Validate(); err == nil {
-		t.Fatal("expected keep_last parse error")
+		t.Fatal("expected daily parse error")
 	}
 
-	f.fields[fieldKeepLast] = "7"
-	f.fields[fieldMaxAge] = "nope"
+	f.fields[fieldDaily] = "7"
+	f.fields[fieldWeekly] = "nope"
 	if _, err := f.Validate(); err == nil {
-		t.Fatal("expected max_age error")
+		t.Fatal("expected weekly parse error")
 	}
 
-	f.fields[fieldMaxAge] = "7d"
+	f.fields[fieldWeekly] = "8"
+	f.fields[fieldMonthly] = "9"
+	f.fields[fieldYearly] = "10"
 	f.fields[fieldRecursive] = "true"
 	s, err := f.Validate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Name != "daily" || s.Dataset != "tank/b" || !s.Recursive || s.Retention.KeepLast == nil || *s.Retention.KeepLast != 7 || s.Retention.MaxAge != "7d" {
+	if s.Name != "daily" || s.Dataset != "tank/b" || !s.Recursive || s.Retention.Daily != 7 || s.Retention.Weekly != 8 || s.Retention.Monthly != 9 || s.Retention.Yearly != 10 {
 		t.Fatalf("unexpected schedule: %#v", s)
 	}
 }
 
 func TestRetentionSummary(t *testing.T) {
-	keep := 24
-	s := config.Schedule{Retention: config.Retention{KeepLast: &keep, MaxAge: "7d"}}
-	if got := RetentionSummary(s); got != "keep 24, max 7d" {
+	s := config.Schedule{Retention: config.Retention{Daily: 24, Weekly: 8, Monthly: 4, Yearly: 2}}
+	if got := RetentionSummary(s); got != "D 24, W 8, M 4, Y 2" {
 		t.Fatalf("got %q", got)
 	}
 	if got := RetentionSummary(config.Schedule{}); got != "—" {
@@ -268,10 +269,9 @@ func TestSchedulesToggleAndSave(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	cfg := config.Default()
-	keep := 3
 	cfg.Schedules = []config.Schedule{{
 		Name: "s1", Dataset: "tank/home", Cron: "0 * * * *", Prefix: "zfstui",
-		Enabled: true, Retention: config.Retention{KeepLast: &keep},
+		Enabled: true, Retention: config.Retention{Daily: 3, Weekly: 2},
 	}}
 	if err := cfg.Save(path); err != nil {
 		t.Fatal(err)

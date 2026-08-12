@@ -11,13 +11,12 @@ import (
 func TestLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	keep := 24
 	cfg := config.Config{
 		Version: 1,
 		Defaults: config.Defaults{SnapshotPrefix: "zfstui", Recursive: false},
 		Schedules: []config.Schedule{{
 			Name: "tank-home-hourly", Dataset: "tank/home", Cron: "0 * * * *",
-			Prefix: "zfstui", Enabled: true, Retention: config.Retention{KeepLast: &keep, MaxAge: "7d"},
+			Prefix: "zfstui", Enabled: true, Retention: config.Retention{Daily: 24, Weekly: 8, Monthly: 12, Yearly: 5},
 		}},
 		UI: config.UI{Theme: "default"},
 	}
@@ -34,8 +33,8 @@ func TestLoadRoundTrip(t *testing.T) {
 	if len(got.Schedules) != 1 || got.Schedules[0].Name != "tank-home-hourly" {
 		t.Fatalf("unexpected: %+v", got)
 	}
-	if got.Schedules[0].Retention.KeepLast == nil || *got.Schedules[0].Retention.KeepLast != 24 {
-		t.Fatalf("keep_last: %+v", got.Schedules[0].Retention)
+	if got.Schedules[0].Retention.Daily != 24 || got.Schedules[0].Retention.Weekly != 8 || got.Schedules[0].Retention.Monthly != 12 || got.Schedules[0].Retention.Yearly != 5 {
+		t.Fatalf("retention: %+v", got.Schedules[0].Retention)
 	}
 }
 
@@ -68,14 +67,14 @@ func TestValidateRejectsInvalidCron(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsInvalidMaxAge(t *testing.T) {
+func TestValidateRejectsInvalidRetention(t *testing.T) {
 	cfg := config.Default()
 	cfg.Schedules = []config.Schedule{
 		{Name: "bad", Dataset: "tank/a", Cron: "0 * * * *", Prefix: "p", Enabled: true,
-			Retention: config.Retention{MaxAge: "nope"}},
+			Retention: config.Retention{Daily: -1}},
 	}
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected invalid max_age error")
+		t.Fatal("expected invalid retention error")
 	}
 }
 

@@ -2,7 +2,7 @@
 
 Pretty terminal UI for managing **ZFS snapshots** on a schedule.
 
-Browse pools and datasets, create and destroy snapshots, define retention-aware schedules, install managed crontab entries, and restore via **rollback** or **clone** (optional promote). Config YAML is the source of truth; crontab is derived.
+Browse pools and datasets, create and destroy snapshots, define GFS-retention schedules, install managed crontab entries, and restore via **rollback** or **clone** (optional promote). Config YAML is the source of truth; crontab is derived.
 
 ## Install
 
@@ -79,8 +79,10 @@ schedules:
     prefix: zfstui
     enabled: true
     retention:
-      keep_last: 24
-      max_age: 7d
+      daily: 24
+      weekly: 8
+      monthly: 12
+      yearly: 5
   - name: nightly-data
     dataset: tank/data
     recursive: true
@@ -88,18 +90,21 @@ schedules:
     prefix: zfstui
     enabled: true
     retention:
-      keep_last: 7
-      max_age: 30d
+      daily: 7
+      weekly: 4
+      monthly: 12
+      yearly: 3
 ```
 
 **Retention**
 
 | Setting | Behavior |
 |---------|----------|
-| `keep_last: N` only | Keep newest N matching `{dataset}@{prefix}-*` |
-| `max_age: D` only | Drop matching older than duration (`7d`, `30d`, …) |
-| Both | Never delete among newest N; among the rest drop older than D |
-| Neither | No prune |
+| `daily: N` | Keep one snapshot per UTC day for the newest N days with snapshots |
+| `weekly: N` | Keep one snapshot per ISO week for the newest N weeks with snapshots |
+| `monthly: N` | Keep one snapshot per UTC month for the newest N months with snapshots |
+| `yearly: N` | Keep one snapshot per UTC year for the newest N years with snapshots |
+| All zero | No prune |
 
 **Recursive schedules:** when `recursive: true`, create uses `zfs snapshot -r`, but prune only destroys matching snapshots on the **schedule dataset itself** (not child datasets). Manage child retention with separate schedules if needed.
 

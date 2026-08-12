@@ -17,55 +17,50 @@ func snaps(names ...string) []schedule.SnapInfo {
 	return out
 }
 
-func TestKeepLastOnly(t *testing.T) {
-	n := 2
-	del := schedule.SelectForDeletion(snaps("a", "b", "c", "d"), &n, nil, time.Time{})
-	if len(del) != 2 || del[0].Name != "c" || del[1].Name != "d" {
+func TestGFSRetentionDailyWeeklyMonthlyYearly(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	snaps := []schedule.SnapInfo{
+		{Name: "newest", Created: now},
+		{Name: "same-day-late", Created: now.Add(-2 * time.Hour)},
+		{Name: "same-week-late", Created: now.Add(-2 * 24 * time.Hour)},
+		{Name: "same-month-late", Created: now.Add(-20 * 24 * time.Hour)},
+		{Name: "same-year-late", Created: now.Add(-120 * 24 * time.Hour)},
+		{Name: "older-year", Created: now.Add(-500 * 24 * time.Hour)},
+	}
+	ret := schedule.GFSRetention{Daily: 1, Weekly: 1, Monthly: 1, Yearly: 1}
+	del := schedule.SelectForDeletion(snaps, ret, now)
+	if len(del) != 5 {
 		t.Fatalf("got %+v", del)
+	}
+	if del[0].Name != "same-day-late" || del[4].Name != "older-year" {
+		t.Fatalf("unexpected delete set: %+v", del)
 	}
 }
 
-func TestMaxAgeOnly(t *testing.T) {
-	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
-	age := 90 * time.Minute
-	// ages: 0h, 1h, 2h, 3h from newest
-	del := schedule.SelectForDeletion(snaps("a", "b", "c", "d"), nil, &age, now)
-	// created: a=12:00, b=11:00, c=10:00, d=09:00 → c and d older than 90m
-	if len(del) != 2 {
+func TestGFSRetentionMultipleBuckets(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	snaps := []schedule.SnapInfo{
+		{Name: "d1", Created: now},
+		{Name: "d2", Created: now.Add(-24 * time.Hour)},
+		{Name: "d3", Created: now.Add(-48 * time.Hour)},
+		{Name: "d4", Created: now.Add(-72 * time.Hour)},
+		{Name: "d5", Created: now.Add(-96 * time.Hour)},
+		{Name: "d6", Created: now.Add(-120 * time.Hour)},
+	}
+	ret := schedule.GFSRetention{Daily: 2}
+	del := schedule.SelectForDeletion(snaps, ret, now)
+	if len(del) != 4 {
 		t.Fatalf("got %+v", del)
+	}
+	if del[0].Name != "d3" || del[3].Name != "d6" {
+		t.Fatalf("unexpected delete order: %+v", del)
 	}
 }
 
-func TestBothRules(t *testing.T) {
-	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
-	n := 2
-	age := 90 * time.Minute
-	// newest 2 protected even if old; among rest delete if older than 90m
-	del := schedule.SelectForDeletion(snaps("a", "b", "c", "d"), &n, &age, now)
-	// c=2h, d=3h both outside top 2 and older than 90m
-	if len(del) != 2 {
-		t.Fatalf("got %+v", del)
-	}
-	// protect top 2 when they would fail max_age alone
-	oldTop := []schedule.SnapInfo{
-		{Name: "a", Created: now.Add(-3 * time.Hour)},
-		{Name: "b", Created: now.Add(-4 * time.Hour)},
-		{Name: "c", Created: now.Add(-5 * time.Hour)},
-	}
-	del2 := schedule.SelectForDeletion(oldTop, &n, &age, now)
-	// a,b protected; c deleted
-	if len(del2) != 1 || del2[0].Name != "c" {
-		t.Fatalf("got %+v", del2)
-	}
-}
-
-func TestParseMaxAge(t *testing.T) {
-	d, err := schedule.ParseMaxAge("7d")
-	if err != nil || d != 7*24*time.Hour {
-		t.Fatalf("got %v %v", d, err)
-	}
-	d, err = schedule.ParseMaxAge("12h")
-	if err != nil || d != 12*time.Hour {
-		t.Fatalf("got %v %v", d, err)
+func TestGFSRetentionDisabled(t *testing.T) {
+	now := time.Now()
+	del := schedule.SelectForDeletion(snaps("a", "b"), schedule.GFSRetention{}, now)
+	if len(del) != 0 {
+		t.Fatalf("expected no deletes, got %+v", del)
 	}
 }

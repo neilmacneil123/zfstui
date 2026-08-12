@@ -56,16 +56,14 @@ func (r *Runner) PruneSchedule(ctx context.Context, cfg *config.Config, name str
 }
 
 func (r *Runner) prune(ctx context.Context, s *config.Schedule) ([]string, error) {
-	if s.Retention.KeepLast == nil && s.Retention.MaxAge == "" {
-		return nil, nil
+	ret := schedule.GFSRetention{
+		Daily:   s.Retention.Daily,
+		Weekly:  s.Retention.Weekly,
+		Monthly: s.Retention.Monthly,
+		Yearly:  s.Retention.Yearly,
 	}
-	var maxAge *time.Duration
-	if s.Retention.MaxAge != "" {
-		d, err := schedule.ParseMaxAge(s.Retention.MaxAge)
-		if err != nil {
-			return nil, err
-		}
-		maxAge = &d
+	if !ret.Enabled() {
+		return nil, nil
 	}
 	list, err := r.Z.ListSnapshots(ctx, s.Dataset)
 	if err != nil {
@@ -77,7 +75,7 @@ func (r *Runner) prune(ctx context.Context, s *config.Schedule) ([]string, error
 			matched = append(matched, schedule.SnapInfo{Name: sn.Name, Created: sn.Creation})
 		}
 	}
-	toDel := schedule.SelectForDeletion(matched, s.Retention.KeepLast, maxAge, r.now())
+	toDel := schedule.SelectForDeletion(matched, ret, r.now())
 	var pruned []string
 	for _, d := range toDel {
 		if err := r.Z.DestroySnapshot(ctx, d.Name, false); err != nil {
