@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/zfstui/zfstui/internal/config"
+	"github.com/zfstui/zfstui/internal/zfs"
 )
 
 // SchedulesStatusMsg updates the root status bar from the schedules screen.
@@ -27,6 +28,7 @@ type Schedules struct {
 	Height  int
 	Cfg     *config.Config
 	CfgPath string
+	Z       zfs.Client
 
 	cursor  int
 	Form    ScheduleForm
@@ -35,8 +37,12 @@ type Schedules struct {
 }
 
 // NewSchedules constructs the schedules browser bound to cfg.
-func NewSchedules(cfg *config.Config, cfgPath string) Schedules {
-	return Schedules{Cfg: cfg, CfgPath: cfgPath}
+func NewSchedules(cfg *config.Config, cfgPath string, clients ...zfs.Client) Schedules {
+	var client zfs.Client
+	if len(clients) > 0 {
+		client = clients[0]
+	}
+	return Schedules{Cfg: cfg, CfgPath: cfgPath, Z: client}
 }
 
 // InputCaptured reports whether keys should not be handled globally (form/confirm).
@@ -179,6 +185,10 @@ func (s Schedules) beginAdd() (Schedules, tea.Cmd) {
 	}
 	s.Form = NewScheduleFormAdd(s.Cfg.Defaults, s.Cfg.Schedules)
 	s.Form.Width = minInt(s.Width-4, 64)
+	if s.Z != nil {
+		s.Form.startDatasetLoad()
+		return s, LoadScheduleDatasetsCmd(s.Z)
+	}
 	return s, nil
 }
 
@@ -192,6 +202,10 @@ func (s Schedules) beginEdit() (Schedules, tea.Cmd) {
 	cur := s.Cfg.Schedules[s.cursor]
 	s.Form = NewScheduleFormEdit(s.cursor, cur, s.Cfg.Defaults, s.Cfg.Schedules)
 	s.Form.Width = minInt(s.Width-4, 64)
+	if s.Z != nil {
+		s.Form.startDatasetLoad()
+		return s, LoadScheduleDatasetsCmd(s.Z)
+	}
 	return s, nil
 }
 

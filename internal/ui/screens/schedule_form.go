@@ -1,7 +1,9 @@
 package screens
 
 import (
+	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -11,6 +13,7 @@ import (
 
 	"github.com/zfstui/zfstui/internal/config"
 	"github.com/zfstui/zfstui/internal/schedule"
+	"github.com/zfstui/zfstui/internal/zfs"
 )
 
 // schedule form field indices.
@@ -51,6 +54,73 @@ type ScheduleForm struct {
 	defaults config.Defaults
 	// taken names when adding/renaming (exclude current edit name).
 	taken map[string]struct{}
+
+	datasets       []string
+	datasetLoading bool
+	datasetPicker  bool
+	datasetCursor  int
+	cronPicker     cronPicker
+}
+
+// ScheduleDatasetsLoadedMsg supplies the schedule form's live dataset choices.
+type ScheduleDatasetsLoadedMsg struct {
+	Datasets []string
+	Err      error
+}
+
+// LoadScheduleDatasetsCmd loads datasets from every pool for the schedule picker.
+func LoadScheduleDatasetsCmd(z zfs.Client) tea.Cmd {
+	return func() tea.Msg {
+		if z == nil {
+			return ScheduleDatasetsLoadedMsg{Err: fmt.Errorf("zfs client unavailable")}
+		}
+		pools, err := z.ListPools(context.Background())
+		if err != nil {
+			return ScheduleDatasetsLoadedMsg{Err: err}
+		}
+		seen := make(map[string]struct{})
+		var names []string
+		for _, pool := range pools {
+			datasets, err := z.ListDatasets(context.Background(), pool.Name)
+			if err != nil {
+				return ScheduleDatasetsLoadedMsg{Err: err}
+			}
+			for _, dataset := range datasets {
+				if dataset.Name == "" {
+					continue
+				}
+				if _, ok := seen[dataset.Name]; ok {
+					continue
+				}
+				seen[dataset.Name] = struct{}{}
+				names = append(names, dataset.Name)
+			}
+		}
+		sort.Strings(names)
+		return ScheduleDatasetsLoadedMsg{Datasets: names}
+	}
+}
+
+type cronFrequency int
+
+const (
+	cronHourly cronFrequency = iota
+	cronDaily
+	cronWeekly
+	cronMonthly
+)
+
+var cronFrequencyNames = []string{"Hourly", "Daily", "Weekly", "Monthly"}
+var weekdayNames = []string{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"}
+
+type cronPicker struct {
+	Active    bool
+	Frequency cronFrequency
+	Cursor    int
+	Minute    int
+	Hour      int
+	Weekday   int
+	MonthDay  int
 }
 
 // NewScheduleFormAdd builds an empty form prefilled with defaults.
@@ -129,7 +199,22 @@ func (f ScheduleForm) Update(msg tea.Msg) (ScheduleForm, tea.Cmd) {
 		return f, nil
 	}
 	switch msg := msg.(type) {
+	case ScheduleDatasetsLoadedMsg:
+		f.datasetLoading = false
+		if msg.Err != nil {
+			f.err = "load datasets: " + msg.Err.Error()
+			return f, nil
+		}
+		f.datasets = append([]string(nil), msg.Datasets...)
+		f.syncDatasetCursor()
+		return f, nil
 	case tea.KeyMsg:
+		if f.datasetPicker {
+			return f.updateDatasetPicker(msg)
+		}
+		if f.cronPicker.Active {
+			return f.updateCronPicker(msg)
+		}
 		return f.updateKey(msg)
 	}
 	return f, nil
@@ -165,7 +250,13 @@ func (f ScheduleForm) updateKey(msg tea.KeyMsg) (ScheduleForm, tea.Cmd) {
 		return f, nil
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
-		// enter on recursive toggles; otherwise save.
+		if f.cursor == fieldDataset {
+			return f.openDatasetPicker()
+		}
+		if f.cursor == fieldCron {
+			f.openCronPicker()
+			return f, nil
+		}
 		if f.cursor == fieldRecursive {
 			f.toggleRecursive()
 			return f, nil
@@ -203,6 +294,167 @@ func (f ScheduleForm) updateKey(msg tea.KeyMsg) (ScheduleForm, tea.Cmd) {
 		return f.typeRunes(msg.Runes)
 	}
 	return f, nil
+}
+
+func (f *ScheduleForm) startDatasetLoad() {
+	f.datasetLoading = true
+}
+
+func (f *ScheduleForm) syncDatasetCursor() {
+	f.datasetCursor = 0
+	current := strings.TrimSpace(f.fields[fieldDataset])
+	for i, name := range f.datasets {
+		if name == current {
+			f.datasetCursor = i
+			return
+		}
+	}
+}
+
+func (f ScheduleForm) openDatasetPicker() (ScheduleForm, tea.Cmd) {
+	if f.datasetLoading {
+		f.err = "datasets are still loading"
+		return f, nil
+	}
+	if len(f.datasets) == 0 {
+		f.err = "no live datasets found; type a dataset path manually"
+		return f, nil
+	}
+	f.syncDatasetCursor()
+	f.datasetPicker = true
+	f.err = ""
+	return f, nil
+}
+
+func (f ScheduleForm) updateDatasetPicker(msg tea.KeyMsg) (ScheduleForm, tea.Cmd) {
+	switch {
+	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+		f.datasetPicker = false
+	case key.Matches(msg, key.NewBinding(key.WithKeys("up", "k"))):
+		if f.datasetCursor > 0 {
+			f.datasetCursor--
+		} else {
+			f.datasetCursor = len(f.datasets) - 1
+		}
+	case key.Matches(msg, key.NewBinding(key.WithKeys("down", "j"))):
+		if f.datasetCursor < len(f.datasets)-1 {
+			f.datasetCursor++
+		} else {
+			f.datasetCursor = 0
+		}
+	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+		if f.datasetCursor >= 0 && f.datasetCursor < len(f.datasets) {
+			f.fields[fieldDataset] = f.datasets[f.datasetCursor]
+		}
+		f.datasetPicker = false
+		f.err = ""
+	}
+	return f, nil
+}
+
+func (f *ScheduleForm) openCronPicker() {
+	f.cronPicker = cronPickerFromExpression(f.fields[fieldCron])
+	f.cronPicker.Active = true
+	f.err = ""
+}
+
+func cronPickerFromExpression(expr string) cronPicker {
+	p := cronPicker{Frequency: cronDaily, Minute: 0, Hour: 2, MonthDay: 1}
+	parts := strings.Fields(expr)
+	if len(parts) != 5 {
+		return p
+	}
+	minute, minuteErr := strconv.Atoi(parts[0])
+	if minuteErr == nil && minute >= 0 && minute <= 59 {
+		p.Minute = minute
+	}
+	if parts[1] == "*" && parts[2] == "*" && parts[3] == "*" && parts[4] == "*" {
+		p.Frequency = cronHourly
+		return p
+	}
+	hour, hourErr := strconv.Atoi(parts[1])
+	if hourErr == nil && hour >= 0 && hour <= 23 {
+		p.Hour = hour
+	}
+	if day, err := strconv.Atoi(parts[2]); err == nil && day >= 1 && day <= 31 && parts[3] == "*" && parts[4] == "*" {
+		p.Frequency = cronMonthly
+		p.MonthDay = day
+		return p
+	}
+	if day, err := strconv.Atoi(parts[4]); err == nil && day >= 0 && day <= 6 && parts[2] == "*" && parts[3] == "*" {
+		p.Frequency = cronWeekly
+		p.Weekday = day
+		return p
+	}
+	if parts[2] == "*" && parts[3] == "*" && parts[4] == "*" {
+		p.Frequency = cronDaily
+	}
+	return p
+}
+
+func (p cronPicker) settingCount() int {
+	if p.Frequency == cronHourly {
+		return 2
+	}
+	if p.Frequency == cronDaily {
+		return 3
+	}
+	return 4
+}
+
+func (p cronPicker) expression() string {
+	switch p.Frequency {
+	case cronHourly:
+		return fmt.Sprintf("%d * * * *", p.Minute)
+	case cronWeekly:
+		return fmt.Sprintf("%d %d * * %d", p.Minute, p.Hour, p.Weekday)
+	case cronMonthly:
+		return fmt.Sprintf("%d %d %d * *", p.Minute, p.Hour, p.MonthDay)
+	default:
+		return fmt.Sprintf("%d %d * * *", p.Minute, p.Hour)
+	}
+}
+
+func (f ScheduleForm) updateCronPicker(msg tea.KeyMsg) (ScheduleForm, tea.Cmd) {
+	p := &f.cronPicker
+	switch {
+	case key.Matches(msg, key.NewBinding(key.WithKeys("esc", "c"))):
+		p.Active = false
+	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+		f.fields[fieldCron] = p.expression()
+		p.Active = false
+		f.err = ""
+	case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
+		p.Cursor = (p.Cursor + 1) % p.settingCount()
+	case key.Matches(msg, key.NewBinding(key.WithKeys("shift+tab"))):
+		p.Cursor = (p.Cursor - 1 + p.settingCount()) % p.settingCount()
+	case key.Matches(msg, key.NewBinding(key.WithKeys("right", "up", "l", "k"))):
+		adjustCronPicker(p, 1)
+	case key.Matches(msg, key.NewBinding(key.WithKeys("left", "down", "h", "j"))):
+		adjustCronPicker(p, -1)
+	}
+	return f, nil
+}
+
+func adjustCronPicker(p *cronPicker, delta int) {
+	wrap := func(value, size int) int { return (value + delta + size) % size }
+	switch p.Cursor {
+	case 0:
+		p.Frequency = cronFrequency(wrap(int(p.Frequency), len(cronFrequencyNames)))
+		if p.Cursor >= p.settingCount() {
+			p.Cursor = p.settingCount() - 1
+		}
+	case 1:
+		p.Minute = wrap(p.Minute, 60)
+	case 2:
+		p.Hour = wrap(p.Hour, 24)
+	case 3:
+		if p.Frequency == cronWeekly {
+			p.Weekday = wrap(p.Weekday, 7)
+		} else {
+			p.MonthDay = wrap(p.MonthDay-1, 31) + 1
+		}
+	}
 }
 
 func (f ScheduleForm) typeRunes(runes []rune) (ScheduleForm, tea.Cmd) {
@@ -342,10 +594,23 @@ func (f ScheduleForm) View() string {
 	var lines []string
 	lines = append(lines, titleStyle.Render(title))
 	lines = append(lines, "")
+	if f.datasetPicker {
+		lines = append(lines, f.renderDatasetPicker(), "")
+		lines = append(lines, muted.Render("↑↓ choose dataset · enter select · esc close"))
+		return f.renderBox(lines)
+	}
+	if f.cronPicker.Active {
+		lines = append(lines, f.renderCronPicker(), "")
+		lines = append(lines, muted.Render("tab field · ←→ adjust · enter apply · c custom · esc close"))
+		return f.renderBox(lines)
+	}
 
 	for i := 0; i < fieldCount; i++ {
 		label := fmt.Sprintf("%-10s", formFieldLabels[i])
 		val := f.fields[i]
+		if i == fieldDataset && val == "" && f.datasetLoading {
+			val = "loading datasets…"
+		}
 		if i == fieldRecursive {
 			if val == "true" {
 				val = "yes"
@@ -363,14 +628,17 @@ func (f ScheduleForm) View() string {
 			lines = append(lines, "  "+labelStyle.Render(label)+" "+valueStyle.Render(val))
 		}
 	}
-
 	lines = append(lines, "")
 	if f.err != "" {
 		lines = append(lines, errStyle.Render(f.err))
 		lines = append(lines, "")
 	}
-	lines = append(lines, muted.Render("tab/↑↓ fields · enter save · space toggle recursive · esc cancel"))
+	lines = append(lines, muted.Render("tab/↑↓ fields · enter choose/save · ctrl+s save · esc cancel"))
+	lines = append(lines, muted.Render("dataset/cron: enter opens picker · raw values remain editable"))
+	return f.renderBox(lines)
+}
 
+func (f ScheduleForm) renderBox(lines []string) string {
 	w := f.Width
 	if w < 40 {
 		w = 52
@@ -384,4 +652,69 @@ func (f ScheduleForm) View() string {
 		Padding(1, 2).
 		Width(w).
 		Render(strings.Join(lines, "\n"))
+}
+
+func (f ScheduleForm) renderDatasetPicker() string {
+	const visible = 8
+	start := f.datasetCursor - visible/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + visible
+	if end > len(f.datasets) {
+		end = len(f.datasets)
+		start = end - visible
+		if start < 0 {
+			start = 0
+		}
+	}
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e879f9"))
+	selected := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#0d1117")).Background(lipgloss.Color("#22d3ee"))
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#6b7280"))
+	lines := []string{title.Render(fmt.Sprintf("Dataset (%d)", len(f.datasets)))}
+	if start > 0 {
+		lines = append(lines, muted.Render("  …"))
+	}
+	for i := start; i < end; i++ {
+		line := "  " + f.datasets[i]
+		if i == f.datasetCursor {
+			line = selected.Render("▸ " + f.datasets[i] + " ")
+		}
+		lines = append(lines, line)
+	}
+	if end < len(f.datasets) {
+		lines = append(lines, muted.Render("  …"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (f ScheduleForm) renderCronPicker() string {
+	p := f.cronPicker
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e879f9"))
+	label := lipgloss.NewStyle().Foreground(lipgloss.Color("#6b7280"))
+	selected := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#0d1117")).Background(lipgloss.Color("#22d3ee"))
+	value := lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3"))
+	items := []struct{ name, value string }{
+		{"frequency", cronFrequencyNames[p.Frequency]},
+		{"minute", fmt.Sprintf("%02d", p.Minute)},
+	}
+	if p.Frequency != cronHourly {
+		items = append(items, struct{ name, value string }{"hour", fmt.Sprintf("%02d", p.Hour)})
+	}
+	if p.Frequency == cronWeekly {
+		items = append(items, struct{ name, value string }{"weekday", weekdayNames[p.Weekday]})
+	} else if p.Frequency == cronMonthly {
+		items = append(items, struct{ name, value string }{"month day", strconv.Itoa(p.MonthDay)})
+	}
+	lines := []string{title.Render("Schedule builder")}
+	for i, item := range items {
+		v := value.Render(item.value)
+		if i == p.Cursor {
+			v = selected.Render(" " + item.value + " ")
+		}
+		lines = append(lines, fmt.Sprintf("  %s %s", label.Render(fmt.Sprintf("%-10s", item.name)), v))
+	}
+	lines = append(lines, "", label.Render("  cron preview  ")+value.Render(p.expression()))
+	lines = append(lines, label.Render("  Runs in the host's local timezone."))
+	return strings.Join(lines, "\n")
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -252,6 +253,75 @@ func TestScheduleFormValidate(t *testing.T) {
 	}
 	if s.Name != "daily" || s.Dataset != "tank/b" || !s.Recursive || s.Retention.Daily != 7 || s.Retention.Weekly != 8 || s.Retention.Monthly != 9 || s.Retention.Yearly != 10 {
 		t.Fatalf("unexpected schedule: %#v", s)
+	}
+}
+
+func TestScheduleDatasetPickerLoadsAllPoolsAndSelects(t *testing.T) {
+	fake := zfs.NewFake()
+	fake.Pools = []zfs.Pool{{Name: "zfsnvme"}, {Name: "tank"}}
+	fake.Datasets = []zfs.Dataset{
+		{Name: "zfsnvme/apps"},
+		{Name: "tank/home"},
+		{Name: "zfsnvme"},
+		{Name: "tank"},
+	}
+
+	msg := LoadScheduleDatasetsCmd(fake)().(ScheduleDatasetsLoadedMsg)
+	if msg.Err != nil {
+		t.Fatal(msg.Err)
+	}
+	want := []string{"tank", "tank/home", "zfsnvme", "zfsnvme/apps"}
+	if !reflect.DeepEqual(msg.Datasets, want) {
+		t.Fatalf("datasets: got %#v want %#v", msg.Datasets, want)
+	}
+
+	f := NewScheduleFormAdd(config.Defaults{SnapshotPrefix: "zfstui"}, nil)
+	f, _ = f.Update(msg)
+	f.cursor = fieldDataset
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !f.datasetPicker {
+		t.Fatal("dataset picker should open")
+	}
+	f.datasetCursor = 3
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if f.datasetPicker || f.fields[fieldDataset] != "zfsnvme/apps" {
+		t.Fatalf("selection failed: picker=%v dataset=%q", f.datasetPicker, f.fields[fieldDataset])
+	}
+}
+
+func TestCronPickerCanonicalExpressions(t *testing.T) {
+	tests := []struct {
+		expr string
+		freq cronFrequency
+	}{
+		{"15 * * * *", cronHourly},
+		{"30 2 * * *", cronDaily},
+		{"45 3 * * 1", cronWeekly},
+		{"5 4 15 * *", cronMonthly},
+	}
+	for _, tc := range tests {
+		p := cronPickerFromExpression(tc.expr)
+		if p.Frequency != tc.freq || p.expression() != tc.expr {
+			t.Errorf("%q: frequency=%v expression=%q", tc.expr, p.Frequency, p.expression())
+		}
+	}
+}
+
+func TestCronPickerAppliesSelectedTime(t *testing.T) {
+	f := NewScheduleFormAdd(config.Defaults{SnapshotPrefix: "zfstui"}, nil)
+	f.fields[fieldCron] = "0 * * * *"
+	f.cursor = fieldCron
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !f.cronPicker.Active {
+		t.Fatal("cron picker should open")
+	}
+	// Hourly -> Daily, minute 00 -> 01, retain the default 02:00 hour.
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyRight})
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyTab})
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyRight})
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if f.cronPicker.Active || f.fields[fieldCron] != "1 2 * * *" {
+		t.Fatalf("cron selection failed: active=%v cron=%q", f.cronPicker.Active, f.fields[fieldCron])
 	}
 }
 

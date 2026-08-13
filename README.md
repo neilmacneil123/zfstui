@@ -53,7 +53,7 @@ zfstui --config ~/.config/zfstui/config.yaml --dry-run
 
 **Restore wizard (`r`):** choose **Rollback** (lists newer snaps; type dataset name) or **Clone** (new path → promote y/n → confirm). Dry-run is honored via the ZFS client.
 
-**Schedules:** `a` add · `e` edit · `x` delete · `space` toggle enabled  
+**Schedules:** `a` add · `e` edit · `x` delete · `space` toggle enabled. In the editor, press `enter` on **dataset** to choose from live ZFS datasets, or on **cron** to build an hourly, daily, weekly, or monthly schedule. Raw dataset paths and advanced cron expressions remain editable.
 
 **Crontab:** `i` install · `u` uninstall · `r` refresh preview  
 

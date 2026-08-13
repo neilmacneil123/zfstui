@@ -240,6 +240,11 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.schedules, cmd = m.schedules.Update(msg)
 		return m, cmd
 
+	case screens.ScheduleDatasetsLoadedMsg:
+		var cmd tea.Cmd
+		m.schedules, cmd = m.schedules.Update(msg)
+		return m, cmd
+
 	case screens.SchedulesStatusMsg:
 		m.setStatus(msg.Text, msg.IsErr)
 		return m, m.maybeClearErrCmd(msg.IsErr)
@@ -388,7 +393,7 @@ func (m App) handleSelect(action screens.MenuAction) (tea.Model, tea.Cmd) {
 		m.setStatus("Loading pools…", false)
 		return m, screens.LoadPoolsCmd(m.deps.Z)
 	case screens.ActionSchedules:
-		m.schedules = screens.NewSchedules(m.deps.Cfg, m.deps.CfgPath)
+		m.schedules = screens.NewSchedules(m.deps.Cfg, m.deps.CfgPath, m.deps.Z)
 		m.schedules.Width = m.width
 		m.schedules.Height = m.height
 		m.screen = screenSchedules
