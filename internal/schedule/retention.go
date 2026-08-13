@@ -12,6 +12,7 @@ type SnapInfo struct {
 }
 
 type GFSRetention struct {
+	Hourly  int
 	Daily   int
 	Weekly  int
 	Monthly int
@@ -19,7 +20,7 @@ type GFSRetention struct {
 }
 
 func (r GFSRetention) Enabled() bool {
-	return r.Daily > 0 || r.Weekly > 0 || r.Monthly > 0 || r.Yearly > 0
+	return r.Hourly > 0 || r.Daily > 0 || r.Weekly > 0 || r.Monthly > 0 || r.Yearly > 0
 }
 
 // SelectForDeletion returns snapshots that should be destroyed using classic GFS retention.
@@ -34,6 +35,7 @@ func SelectForDeletion(snaps []SnapInfo, retention GFSRetention, now time.Time) 
 	})
 
 	keep := map[string]struct{}{}
+	keepTierBuckets(items, keep, retention.Hourly, now, bucketHour)
 	keepTierBuckets(items, keep, retention.Daily, now, bucketDay)
 	keepTierBuckets(items, keep, retention.Weekly, now, bucketWeek)
 	keepTierBuckets(items, keep, retention.Monthly, now, bucketMonth)
@@ -69,6 +71,11 @@ func keepTierBuckets(items []SnapInfo, keep map[string]struct{}, count int, now 
 			return
 		}
 	}
+}
+
+func bucketHour(t time.Time) string {
+	y, m, d := t.Date()
+	return fmt.Sprintf("%04d-%02d-%02dT%02d", y, int(m), d, t.Hour())
 }
 
 func bucketDay(t time.Time) string {

@@ -12,11 +12,11 @@ func TestLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	cfg := config.Config{
-		Version: 1,
+		Version:  1,
 		Defaults: config.Defaults{SnapshotPrefix: "zfstui", Recursive: false},
 		Schedules: []config.Schedule{{
 			Name: "tank-home-hourly", Dataset: "tank/home", Cron: "0 * * * *",
-			Prefix: "zfstui", Enabled: true, Retention: config.Retention{Daily: 24, Weekly: 8, Monthly: 12, Yearly: 5},
+			Prefix: "zfstui", Enabled: true, Retention: config.Retention{Hourly: 24, Daily: 14, Weekly: 8, Monthly: 12, Yearly: 5},
 		}},
 		UI: config.UI{Theme: "default"},
 	}
@@ -33,7 +33,7 @@ func TestLoadRoundTrip(t *testing.T) {
 	if len(got.Schedules) != 1 || got.Schedules[0].Name != "tank-home-hourly" {
 		t.Fatalf("unexpected: %+v", got)
 	}
-	if got.Schedules[0].Retention.Daily != 24 || got.Schedules[0].Retention.Weekly != 8 || got.Schedules[0].Retention.Monthly != 12 || got.Schedules[0].Retention.Yearly != 5 {
+	if got.Schedules[0].Retention.Hourly != 24 || got.Schedules[0].Retention.Daily != 14 || got.Schedules[0].Retention.Weekly != 8 || got.Schedules[0].Retention.Monthly != 12 || got.Schedules[0].Retention.Yearly != 5 {
 		t.Fatalf("retention: %+v", got.Schedules[0].Retention)
 	}
 }

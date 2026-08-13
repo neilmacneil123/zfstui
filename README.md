@@ -79,7 +79,8 @@ schedules:
     prefix: zfstui
     enabled: true
     retention:
-      daily: 24
+      hourly: 24
+      daily: 14
       weekly: 8
       monthly: 12
       yearly: 5
@@ -100,6 +101,7 @@ schedules:
 
 | Setting | Behavior |
 |---------|----------|
+| `hourly: N` | Keep one snapshot per UTC hour for the newest N hours with snapshots |
 | `daily: N` | Keep one snapshot per UTC day for the newest N days with snapshots |
 | `weekly: N` | Keep one snapshot per ISO week for the newest N weeks with snapshots |
 | `monthly: N` | Keep one snapshot per UTC month for the newest N months with snapshots |

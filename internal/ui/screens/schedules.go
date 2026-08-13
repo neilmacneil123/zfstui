@@ -322,6 +322,9 @@ func RetentionSummary(s config.Schedule) string {
 
 func retentionSummary(s config.Schedule) string {
 	var parts []string
+	if s.Retention.Hourly > 0 {
+		parts = append(parts, fmt.Sprintf("H %d", s.Retention.Hourly))
+	}
 	if s.Retention.Daily > 0 {
 		parts = append(parts, fmt.Sprintf("D %d", s.Retention.Daily))
 	}

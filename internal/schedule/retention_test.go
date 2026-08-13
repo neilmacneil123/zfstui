@@ -1,6 +1,7 @@
 package schedule_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -54,6 +55,24 @@ func TestGFSRetentionMultipleBuckets(t *testing.T) {
 	}
 	if del[0].Name != "d3" || del[3].Name != "d6" {
 		t.Fatalf("unexpected delete order: %+v", del)
+	}
+}
+
+func TestGFSRetentionHourlyBuckets(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 45, 0, 0, time.UTC)
+	var input []schedule.SnapInfo
+	for i := 0; i < 30; i++ {
+		input = append(input, schedule.SnapInfo{
+			Name:    fmt.Sprintf("h%d", i),
+			Created: now.Add(-time.Duration(i) * time.Hour),
+		})
+	}
+	del := schedule.SelectForDeletion(input, schedule.GFSRetention{Hourly: 24}, now)
+	if len(del) != 6 {
+		t.Fatalf("got %d deletions: %+v", len(del), del)
+	}
+	if del[0].Name != "h24" || del[5].Name != "h29" {
+		t.Fatalf("unexpected delete set: %+v", del)
 	}
 }
 

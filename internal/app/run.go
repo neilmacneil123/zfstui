@@ -57,6 +57,7 @@ func (r *Runner) PruneSchedule(ctx context.Context, cfg *config.Config, name str
 
 func (r *Runner) prune(ctx context.Context, s *config.Schedule) ([]string, error) {
 	ret := schedule.GFSRetention{
+		Hourly:  s.Retention.Hourly,
 		Daily:   s.Retention.Daily,
 		Weekly:  s.Retention.Weekly,
 		Monthly: s.Retention.Monthly,

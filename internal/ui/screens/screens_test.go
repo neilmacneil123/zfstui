@@ -232,11 +232,12 @@ func TestScheduleFormValidate(t *testing.T) {
 	}
 
 	f.fields[fieldCron] = "30 2 * * *"
-	f.fields[fieldDaily] = "abc"
+	f.fields[fieldHourly] = "abc"
 	if _, err := f.Validate(); err == nil {
-		t.Fatal("expected daily parse error")
+		t.Fatal("expected hourly parse error")
 	}
 
+	f.fields[fieldHourly] = "24"
 	f.fields[fieldDaily] = "7"
 	f.fields[fieldWeekly] = "nope"
 	if _, err := f.Validate(); err == nil {
@@ -251,7 +252,7 @@ func TestScheduleFormValidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Name != "daily" || s.Dataset != "tank/b" || !s.Recursive || s.Retention.Daily != 7 || s.Retention.Weekly != 8 || s.Retention.Monthly != 9 || s.Retention.Yearly != 10 {
+	if s.Name != "daily" || s.Dataset != "tank/b" || !s.Recursive || s.Retention.Hourly != 24 || s.Retention.Daily != 7 || s.Retention.Weekly != 8 || s.Retention.Monthly != 9 || s.Retention.Yearly != 10 {
 		t.Fatalf("unexpected schedule: %#v", s)
 	}
 }
@@ -326,8 +327,8 @@ func TestCronPickerAppliesSelectedTime(t *testing.T) {
 }
 
 func TestRetentionSummary(t *testing.T) {
-	s := config.Schedule{Retention: config.Retention{Daily: 24, Weekly: 8, Monthly: 4, Yearly: 2}}
-	if got := RetentionSummary(s); got != "D 24, W 8, M 4, Y 2" {
+	s := config.Schedule{Retention: config.Retention{Hourly: 24, Daily: 14, Weekly: 8, Monthly: 4, Yearly: 2}}
+	if got := RetentionSummary(s); got != "H 24, D 14, W 8, M 4, Y 2" {
 		t.Fatalf("got %q", got)
 	}
 	if got := RetentionSummary(config.Schedule{}); got != "—" {

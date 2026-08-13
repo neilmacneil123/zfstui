@@ -23,6 +23,7 @@ const (
 	fieldCron
 	fieldPrefix
 	fieldRecursive
+	fieldHourly
 	fieldDaily
 	fieldWeekly
 	fieldMonthly
@@ -36,6 +37,7 @@ var formFieldLabels = []string{
 	"cron",
 	"prefix",
 	"recursive",
+	"hourly",
 	"daily",
 	"weekly",
 	"monthly",
@@ -157,6 +159,9 @@ func NewScheduleFormEdit(idx int, s config.Schedule, defaults config.Defaults, e
 		f.fields[fieldPrefix] = defaults.SnapshotPrefix
 	}
 	f.fields[fieldRecursive] = boolStr(s.Recursive)
+	if s.Retention.Hourly > 0 {
+		f.fields[fieldHourly] = strconv.Itoa(s.Retention.Hourly)
+	}
 	if s.Retention.Daily > 0 {
 		f.fields[fieldDaily] = strconv.Itoa(s.Retention.Daily)
 	}
@@ -545,6 +550,9 @@ func (f ScheduleForm) Validate() (config.Schedule, error) {
 	}
 	var ret config.Retention
 	var err error
+	if ret.Hourly, err = parseCount("hourly", f.fields[fieldHourly]); err != nil {
+		return config.Schedule{}, err
+	}
 	if ret.Daily, err = parseCount("daily", f.fields[fieldDaily]); err != nil {
 		return config.Schedule{}, err
 	}

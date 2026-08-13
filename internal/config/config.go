@@ -17,6 +17,7 @@ import (
 var scheduleNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type Retention struct {
+	Hourly  int `yaml:"hourly,omitempty"`
 	Daily   int `yaml:"daily,omitempty"`
 	Weekly  int `yaml:"weekly,omitempty"`
 	Monthly int `yaml:"monthly,omitempty"`
@@ -116,6 +117,9 @@ func (c *Config) Validate() error {
 		}
 		if strings.TrimSpace(s.Prefix) == "" {
 			return fmt.Errorf("schedule %q: prefix is required", s.Name)
+		}
+		if s.Retention.Hourly < 0 {
+			return fmt.Errorf("schedule %q: retention.hourly must be >= 0", s.Name)
 		}
 		if s.Retention.Daily < 0 {
 			return fmt.Errorf("schedule %q: retention.daily must be >= 0", s.Name)
