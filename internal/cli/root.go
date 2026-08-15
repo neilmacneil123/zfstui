@@ -44,7 +44,7 @@ func Main(args []string) int {
 		printUsage(os.Stdout)
 		return 0
 	case "version":
-		fmt.Println(version.Version)
+		fmt.Printf("v%s (build %s)\n", version.Version, version.BuildDate)
 		return 0
 	case "run":
 		return cmdRun(cfgPath, dryRun, cmdArgs)
@@ -99,7 +99,7 @@ Global flags:
   -h, --help      Show this help
 
 Commands:
-  version                           Print version
+  version                           Print version and build date
   run --schedule NAME               Snapshot + prune for one schedule
   snapshot --dataset D [flags]      One-shot snapshot
       --prefix P                    Snapshot prefix (default: config defaults.snapshot_prefix)
@@ -170,8 +170,8 @@ func cmdDefault(cfgPath string, dryRun bool) int {
 		return 0
 	}
 
-	fmt.Fprintln(os.Stdout, "TUI is not ready yet. Available commands: version, run, snapshot, prune, cron, help")
-	return 0
+  fmt.Fprintf(os.Stdout, "TUI is not ready yet. Available commands: version, run, snapshot, prune, cron, help\nBuild: v%s (%s)\n", version.Version, version.BuildDate)
+  return 0
 }
 
 func cmdRun(cfgPath string, dryRun bool, args []string) int {

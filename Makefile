@@ -1,6 +1,7 @@
 BINARY=zfstui
 VERSION?=0.1.0-dev
-LDFLAGS=-s -w -X github.com/zfstui/zfstui/internal/version.Version=$(VERSION)
+BUILD_DATE?=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS=-s -w -X github.com/zfstui/zfstui/internal/version.Version=$(VERSION) -X github.com/zfstui/zfstui/internal/version.BuildDate=$(BUILD_DATE)
 
 .PHONY: build test install clean
 
