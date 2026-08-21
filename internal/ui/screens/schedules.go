@@ -113,14 +113,20 @@ func (s Schedules) handleFormResult(msg ScheduleFormResultMsg) (Schedules, tea.C
 
 	prev := append([]config.Schedule(nil), s.Cfg.Schedules...)
 	prevCursor := s.cursor
-	sched := msg.Schedule
+	entries := msg.Schedules
+	if len(entries) == 0 && msg.Schedule.Name != "" {
+		entries = []config.Schedule{msg.Schedule}
+	}
+	if len(entries) == 0 {
+		return s, schedStatus("no schedules to save", true)
+	}
 	if msg.EditIndex >= 0 && msg.EditIndex < len(s.Cfg.Schedules) {
 		// Preserve enabled flag from existing entry.
-		sched.Enabled = s.Cfg.Schedules[msg.EditIndex].Enabled
-		s.Cfg.Schedules[msg.EditIndex] = sched
+		entries[0].Enabled = s.Cfg.Schedules[msg.EditIndex].Enabled
+		s.Cfg.Schedules[msg.EditIndex] = entries[0]
 		s.cursor = msg.EditIndex
 	} else {
-		s.Cfg.Schedules = append(s.Cfg.Schedules, sched)
+		s.Cfg.Schedules = append(s.Cfg.Schedules, entries...)
 		s.cursor = len(s.Cfg.Schedules) - 1
 	}
 	if err := s.Cfg.Validate(); err != nil {
@@ -137,7 +143,10 @@ func (s Schedules) handleFormResult(msg ScheduleFormResultMsg) (Schedules, tea.C
 	if msg.EditIndex >= 0 {
 		action = "updated"
 	}
-	return s, schedStatus(fmt.Sprintf("%s schedule %s", action, sched.Name), false)
+	if len(entries) == 1 {
+		return s, schedStatus(fmt.Sprintf("%s schedule %s", action, entries[0].Name), false)
+	}
+	return s, schedStatus(fmt.Sprintf("%s %d schedules", action, len(entries)), false)
 }
 
 func (s Schedules) updateKeys(msg tea.KeyMsg) (Schedules, tea.Cmd) {

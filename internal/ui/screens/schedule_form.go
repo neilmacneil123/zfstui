@@ -57,11 +57,12 @@ type ScheduleForm struct {
 	// taken names when adding/renaming (exclude current edit name).
 	taken map[string]struct{}
 
-	datasets       []string
-	datasetLoading bool
-	datasetPicker  bool
-	datasetCursor  int
-	cronPicker     cronPicker
+	datasets         []string
+	selectedDatasets map[string]struct{}
+	datasetLoading   bool
+	datasetPicker    bool
+	datasetCursor    int
+	cronPicker       cronPicker
 }
 
 // ScheduleDatasetsLoadedMsg supplies the schedule form's live dataset choices.
@@ -279,6 +280,10 @@ func (f ScheduleForm) updateKey(msg tea.KeyMsg) (ScheduleForm, tea.Cmd) {
 		if f.cursor == fieldRecursive {
 			return f, nil
 		}
+		if f.cursor == fieldDataset {
+			f.clearDatasetSelections()
+			f.fields[fieldDataset] = ""
+		}
 		if v := f.fields[f.cursor]; len(v) > 0 {
 			f.fields[f.cursor] = v[:len(v)-1]
 		}
@@ -296,6 +301,10 @@ func (f ScheduleForm) updateKey(msg tea.KeyMsg) (ScheduleForm, tea.Cmd) {
 			}
 			return f, nil
 		}
+		if f.cursor == fieldDataset {
+			f.clearDatasetSelections()
+			f.fields[fieldDataset] = ""
+		}
 		return f.typeRunes(msg.Runes)
 	}
 	return f, nil
@@ -305,8 +314,51 @@ func (f *ScheduleForm) startDatasetLoad() {
 	f.datasetLoading = true
 }
 
+func (f *ScheduleForm) clearDatasetSelections() {
+	if len(f.selectedDatasets) == 0 {
+		return
+	}
+	f.selectedDatasets = nil
+}
+
+func (f ScheduleForm) hasDatasetSelections() bool {
+	return len(f.selectedDatasets) > 0
+}
+
+func (f ScheduleForm) selectedDatasetList() []string {
+	if len(f.selectedDatasets) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(f.selectedDatasets))
+	for _, name := range f.datasets {
+		if _, ok := f.selectedDatasets[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func (f ScheduleForm) effectiveDatasetList() []string {
+	if selected := f.selectedDatasetList(); len(selected) > 0 {
+		return selected
+	}
+	if dataset := strings.TrimSpace(f.fields[fieldDataset]); dataset != "" {
+		return []string{dataset}
+	}
+	return nil
+}
+
 func (f *ScheduleForm) syncDatasetCursor() {
 	f.datasetCursor = 0
+	if selected := f.selectedDatasetList(); len(selected) > 0 {
+		current := selected[0]
+		for i, name := range f.datasets {
+			if name == current {
+				f.datasetCursor = i
+				return
+			}
+		}
+	}
 	current := strings.TrimSpace(f.fields[fieldDataset])
 	for i, name := range f.datasets {
 		if name == current {
@@ -326,6 +378,20 @@ func (f ScheduleForm) openDatasetPicker() (ScheduleForm, tea.Cmd) {
 		return f, nil
 	}
 	f.syncDatasetCursor()
+	if f.EditIndex < 0 && len(f.selectedDatasets) == 0 {
+		current := strings.TrimSpace(f.fields[fieldDataset])
+		if current != "" {
+			if f.selectedDatasets == nil {
+				f.selectedDatasets = make(map[string]struct{})
+			}
+			for _, name := range f.datasets {
+				if name == current {
+					f.selectedDatasets[name] = struct{}{}
+					break
+				}
+			}
+		}
+	}
 	f.datasetPicker = true
 	f.err = ""
 	return f, nil
@@ -335,6 +401,9 @@ func (f ScheduleForm) updateDatasetPicker(msg tea.KeyMsg) (ScheduleForm, tea.Cmd
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		f.datasetPicker = false
+		if f.EditIndex < 0 && len(f.selectedDatasets) > 0 {
+			f.fields[fieldDataset] = f.datasetDisplayValue()
+		}
 	case key.Matches(msg, key.NewBinding(key.WithKeys("up", "k"))):
 		if f.datasetCursor > 0 {
 			f.datasetCursor--
@@ -347,14 +416,50 @@ func (f ScheduleForm) updateDatasetPicker(msg tea.KeyMsg) (ScheduleForm, tea.Cmd
 		} else {
 			f.datasetCursor = 0
 		}
+	case key.Matches(msg, key.NewBinding(key.WithKeys(" "))):
+		if f.EditIndex < 0 {
+			f.toggleDatasetSelection()
+		}
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 		if f.datasetCursor >= 0 && f.datasetCursor < len(f.datasets) {
-			f.fields[fieldDataset] = f.datasets[f.datasetCursor]
+			if f.EditIndex < 0 {
+				if len(f.selectedDatasets) == 0 {
+					f.toggleDatasetSelection()
+				}
+				f.fields[fieldDataset] = f.datasetDisplayValue()
+			} else {
+				f.fields[fieldDataset] = f.datasets[f.datasetCursor]
+			}
 		}
 		f.datasetPicker = false
 		f.err = ""
 	}
 	return f, nil
+}
+
+func (f *ScheduleForm) toggleDatasetSelection() {
+	if f.selectedDatasets == nil {
+		f.selectedDatasets = make(map[string]struct{})
+	}
+	if f.datasetCursor < 0 || f.datasetCursor >= len(f.datasets) {
+		return
+	}
+	name := f.datasets[f.datasetCursor]
+	if _, ok := f.selectedDatasets[name]; ok {
+		delete(f.selectedDatasets, name)
+		return
+	}
+	f.selectedDatasets[name] = struct{}{}
+}
+
+func (f ScheduleForm) datasetDisplayValue() string {
+	if selected := f.selectedDatasetList(); len(selected) > 0 {
+		if len(selected) == 1 {
+			return selected[0]
+		}
+		return fmt.Sprintf("%d selected", len(selected))
+	}
+	return strings.TrimSpace(f.fields[fieldDataset])
 }
 
 func (f *ScheduleForm) openCronPicker() {
@@ -478,7 +583,7 @@ func (f *ScheduleForm) toggleRecursive() {
 }
 
 func (f ScheduleForm) trySave() (ScheduleForm, tea.Cmd) {
-	s, err := f.Validate()
+	schedules, err := f.buildSchedules()
 	if err != nil {
 		f.err = err.Error()
 		return f, nil
@@ -486,7 +591,10 @@ func (f ScheduleForm) trySave() (ScheduleForm, tea.Cmd) {
 	f.Active = false
 	f.err = ""
 	return f, func() tea.Msg {
-		return ScheduleFormResultMsg{Saved: true, EditIndex: f.EditIndex, Schedule: s}
+		if len(schedules) == 1 {
+			return ScheduleFormResultMsg{Saved: true, EditIndex: f.EditIndex, Schedule: schedules[0]}
+		}
+		return ScheduleFormResultMsg{Saved: true, EditIndex: f.EditIndex, Schedules: schedules}
 	}
 }
 
@@ -495,43 +603,54 @@ type ScheduleFormResultMsg struct {
 	Saved     bool
 	EditIndex int // -1 = add
 	Schedule  config.Schedule
+	Schedules []config.Schedule
 }
 
 // Validate parses and checks form fields. Exported for unit tests.
 func (f ScheduleForm) Validate() (config.Schedule, error) {
+	schedules, err := f.buildSchedules()
+	if err != nil {
+		return config.Schedule{}, err
+	}
+	return schedules[0], nil
+}
+
+func (f ScheduleForm) buildSchedules() ([]config.Schedule, error) {
 	name := strings.TrimSpace(f.fields[fieldName])
-	dataset := strings.TrimSpace(f.fields[fieldDataset])
 	cronExpr := strings.TrimSpace(f.fields[fieldCron])
 	prefix := strings.TrimSpace(f.fields[fieldPrefix])
 	recursive := f.fields[fieldRecursive] == "true"
+	datasets := f.effectiveDatasetList()
 
 	if name == "" {
-		return config.Schedule{}, fmt.Errorf("name is required")
+		return nil, fmt.Errorf("name is required")
 	}
 	for _, r := range name {
 		ok := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') ||
 			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-'
 		if !ok {
-			return config.Schedule{}, fmt.Errorf("name must match [A-Za-z0-9._-]+")
+			return nil, fmt.Errorf("name must match [A-Za-z0-9._-]+")
 		}
 	}
-	if _, dup := f.taken[name]; dup {
-		return config.Schedule{}, fmt.Errorf("duplicate schedule name %q", name)
+	if len(datasets) == 1 {
+		if _, dup := f.taken[name]; dup {
+			return nil, fmt.Errorf("duplicate schedule name %q", name)
+		}
 	}
-	if dataset == "" {
-		return config.Schedule{}, fmt.Errorf("dataset is required")
+	if len(datasets) == 0 {
+		return nil, fmt.Errorf("dataset is required")
 	}
 	if cronExpr == "" {
-		return config.Schedule{}, fmt.Errorf("cron is required")
+		return nil, fmt.Errorf("cron is required")
 	}
 	if err := schedule.ValidateCron(cronExpr); err != nil {
-		return config.Schedule{}, err
+		return nil, err
 	}
 	if prefix == "" {
 		prefix = f.defaults.SnapshotPrefix
 	}
 	if prefix == "" {
-		return config.Schedule{}, fmt.Errorf("prefix is required")
+		return nil, fmt.Errorf("prefix is required")
 	}
 
 	parseCount := func(label, raw string) (int, error) {
@@ -551,30 +670,84 @@ func (f ScheduleForm) Validate() (config.Schedule, error) {
 	var ret config.Retention
 	var err error
 	if ret.Hourly, err = parseCount("hourly", f.fields[fieldHourly]); err != nil {
-		return config.Schedule{}, err
+		return nil, err
 	}
 	if ret.Daily, err = parseCount("daily", f.fields[fieldDaily]); err != nil {
-		return config.Schedule{}, err
+		return nil, err
 	}
 	if ret.Weekly, err = parseCount("weekly", f.fields[fieldWeekly]); err != nil {
-		return config.Schedule{}, err
+		return nil, err
 	}
 	if ret.Monthly, err = parseCount("monthly", f.fields[fieldMonthly]); err != nil {
-		return config.Schedule{}, err
+		return nil, err
 	}
 	if ret.Yearly, err = parseCount("yearly", f.fields[fieldYearly]); err != nil {
-		return config.Schedule{}, err
+		return nil, err
 	}
 
-	return config.Schedule{
-		Name:      name,
-		Dataset:   dataset,
-		Recursive: recursive,
-		Cron:      cronExpr,
-		Prefix:    prefix,
-		Enabled:   true, // add defaults enabled; edit preserves via caller if needed
-		Retention: ret,
-	}, nil
+	schedules := make([]config.Schedule, 0, len(datasets))
+	used := make(map[string]struct{}, len(datasets))
+	for _, dataset := range datasets {
+		schedName := name
+		if len(datasets) > 1 {
+			schedName = uniqueBatchScheduleName(name, dataset, f.taken, used)
+		}
+		schedules = append(schedules, config.Schedule{
+			Name:      schedName,
+			Dataset:   dataset,
+			Recursive: recursive,
+			Cron:      cronExpr,
+			Prefix:    prefix,
+			Enabled:   true, // add defaults enabled; edit preserves via caller if needed
+			Retention: ret,
+		})
+		used[schedName] = struct{}{}
+	}
+	return schedules, nil
+}
+
+func uniqueBatchScheduleName(base, dataset string, taken, batch map[string]struct{}) string {
+	if len(taken) == 0 && len(batch) == 0 {
+		return base
+	}
+	suffix := sanitizeScheduleSuffix(dataset)
+	candidate := base + "-" + suffix
+	if _, ok := taken[candidate]; !ok {
+		if _, ok := batch[candidate]; !ok {
+			return candidate
+		}
+	}
+	for i := 2; ; i++ {
+		next := fmt.Sprintf("%s-%s-%d", base, suffix, i)
+		if _, ok := taken[next]; ok {
+			continue
+		}
+		if _, ok := batch[next]; ok {
+			continue
+		}
+		return next
+	}
+}
+
+func sanitizeScheduleSuffix(dataset string) string {
+	var b strings.Builder
+	for _, r := range dataset {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.' || r == '_' || r == '-':
+			b.WriteRune(r)
+		case r == '/':
+			b.WriteString("__")
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // View renders the form panel.
@@ -604,7 +777,11 @@ func (f ScheduleForm) View() string {
 	lines = append(lines, "")
 	if f.datasetPicker {
 		lines = append(lines, f.renderDatasetPicker(), "")
-		lines = append(lines, muted.Render("↑↓ choose dataset · enter select · esc close"))
+		if f.EditIndex < 0 {
+			lines = append(lines, muted.Render("↑↓ move · space toggle · enter save · esc close"))
+		} else {
+			lines = append(lines, muted.Render("↑↓ choose dataset · enter select · esc close"))
+		}
 		return f.renderBox(lines)
 	}
 	if f.cronPicker.Active {
@@ -618,6 +795,8 @@ func (f ScheduleForm) View() string {
 		val := f.fields[i]
 		if i == fieldDataset && val == "" && f.datasetLoading {
 			val = "loading datasets…"
+		} else if i == fieldDataset && f.hasDatasetSelections() {
+			val = f.datasetDisplayValue()
 		}
 		if i == fieldRecursive {
 			if val == "true" {
@@ -684,9 +863,14 @@ func (f ScheduleForm) renderDatasetPicker() string {
 		lines = append(lines, muted.Render("  …"))
 	}
 	for i := start; i < end; i++ {
-		line := "  " + f.datasets[i]
+		name := f.datasets[i]
+		box := "[ ]"
+		if _, ok := f.selectedDatasets[name]; ok {
+			box = "[x]"
+		}
+		line := fmt.Sprintf("  %s %s", box, name)
 		if i == f.datasetCursor {
-			line = selected.Render("▸ " + f.datasets[i] + " ")
+			line = selected.Render("▸ " + box + " " + name + " ")
 		}
 		lines = append(lines, line)
 	}

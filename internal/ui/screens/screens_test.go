@@ -290,6 +290,55 @@ func TestScheduleDatasetPickerLoadsAllPoolsAndSelects(t *testing.T) {
 	}
 }
 
+func TestScheduleDatasetPickerSupportsMultiSelect(t *testing.T) {
+	fake := zfs.NewFake()
+	fake.Pools = []zfs.Pool{{Name: "zfsnvme"}, {Name: "tank"}}
+	fake.Datasets = []zfs.Dataset{
+		{Name: "tank/home"},
+		{Name: "tank/data"},
+		{Name: "zfsnvme/apps"},
+		{Name: "zfsnvme"},
+	}
+
+	msg := LoadScheduleDatasetsCmd(fake)().(ScheduleDatasetsLoadedMsg)
+	if msg.Err != nil {
+		t.Fatal(msg.Err)
+	}
+
+	f := NewScheduleFormAdd(config.Defaults{SnapshotPrefix: "zfstui"}, nil)
+	f.fields[fieldName] = "nightly"
+	f.fields[fieldCron] = "0 3 * * *"
+	f.fields[fieldPrefix] = "zfstui"
+	f, _ = f.Update(msg)
+	f.cursor = fieldDataset
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !f.datasetPicker {
+		t.Fatal("dataset picker should open")
+	}
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeySpace})
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyDown})
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeySpace})
+	f, _ = f.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if f.datasetPicker {
+		t.Fatal("dataset picker should close")
+	}
+	if got := f.fields[fieldDataset]; got != "2 selected" {
+		t.Fatalf("dataset field summary: %q", got)
+	}
+
+	form, cmd := f.trySave()
+	if form.Active {
+		t.Fatal("form should close after save")
+	}
+	msg2 := cmd().(ScheduleFormResultMsg)
+	if len(msg2.Schedules) != 2 {
+		t.Fatalf("expected 2 schedules, got %#v", msg2)
+	}
+	if msg2.Schedules[0].Name != "nightly-tank__home" || msg2.Schedules[1].Name != "nightly-tank__data" {
+		t.Fatalf("unexpected generated names: %#v", msg2.Schedules)
+	}
+}
+
 func TestCronPickerCanonicalExpressions(t *testing.T) {
 	tests := []struct {
 		expr string
@@ -407,6 +456,42 @@ func TestSchedulesAddViaForm(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSchedulesAddViaFormMultiDataset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := config.Default()
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	sc := NewSchedules(&cfg, path)
+	sc, _ = sc.beginAdd()
+	sc.Form.fields[fieldName] = "nightly"
+	sc.Form.fields[fieldCron] = "0 3 * * *"
+	sc.Form.fields[fieldPrefix] = "zfstui"
+	sc.Form.datasets = []string{"tank/data", "tank/home"}
+	sc.Form.selectedDatasets = map[string]struct{}{"tank/data": {}, "tank/home": {}}
+	sc.Form.fields[fieldDataset] = "2 selected"
+
+	form, cmd := sc.Form.trySave()
+	sc.Form = form
+	res := cmd().(ScheduleFormResultMsg)
+	sc, cmd = sc.Update(res)
+	if cmd == nil {
+		t.Fatal("expected status")
+	}
+	st := cmd().(SchedulesStatusMsg)
+	if st.IsErr {
+		t.Fatal(st.Text)
+	}
+	if len(cfg.Schedules) != 2 {
+		t.Fatalf("expected 2 schedules, got %#v", cfg.Schedules)
+	}
+	if cfg.Schedules[0].Name != "nightly-tank__data" || cfg.Schedules[1].Name != "nightly-tank__home" {
+		t.Fatalf("unexpected schedules: %#v", cfg.Schedules)
 	}
 }
 
