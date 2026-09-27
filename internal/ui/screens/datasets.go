@@ -3,16 +3,60 @@ package screens
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
+	"github.com/zfstui/zfstui/internal/config"
+	cronpkg "github.com/zfstui/zfstui/internal/cron"
 	"github.com/zfstui/zfstui/internal/zfs"
 )
 
-// Dataset level within the pools/datasets browser.
+// Compatibility messages retained for integrations using the old browser.
+type PoolsLoadedMsg struct {
+	Pools []zfs.Pool
+	Err   error
+}
+type DatasetsLoadedMsg struct {
+	Pool     string
+	Datasets []zfs.Dataset
+	Err      error
+}
+type OpenPoolMsg struct{ Pool string }
+type ReloadPoolsMsg struct{}
+type OpenSnapshotsMsg struct{ Dataset string }
+type DatasetsBackMsg struct{}
+type DatasetsStatusMsg struct {
+	Text  string
+	IsErr bool
+	Path  string
+}
+
+type DashboardLoadedMsg struct {
+	Pools                               []zfs.Pool
+	Datasets                            []zfs.Dataset
+	Snapshots                           []zfs.Snapshot
+	Cron                                cronpkg.Status
+	PoolsErr, DatasetsErr, SnapshotsErr error
+}
+type BulkDestroyRequestMsg struct{ Snapshots []zfs.Snapshot }
+type BulkDestroyResultMsg struct {
+	Succeeded, Failed, Simulated []string
+	Errors                       map[string]error
+}
+
+type nodeKind int
+
+const (
+	nodePool nodeKind = iota
+	nodeDataset
+	nodeSnapshot
+)
+
 type datasetLevel int
 
 const (
@@ -20,246 +64,543 @@ const (
 	levelDatasets
 )
 
-// Messages for the datasets browser.
-
-// PoolsLoadedMsg is returned after async ListPools.
-type PoolsLoadedMsg struct {
-	Pools []zfs.Pool
-	Err   error
+type treeNode struct {
+	kind                       nodeKind
+	key, name, parent, dataset string
+	depth, count               int
+	bytes                      uint64
+	newest, creation           time.Time
+	direct, inherited          []config.Schedule
 }
 
-// DatasetsLoadedMsg is returned after async ListDatasets.
-type DatasetsLoadedMsg struct {
-	Pool     string
-	Datasets []zfs.Dataset
-	Err      error
-}
-
-// OpenSnapshotsMsg requests navigation to the snapshots screen.
-type OpenSnapshotsMsg struct {
-	Dataset string
-}
-
-// DatasetsStatusMsg updates the root status bar from the datasets screen.
-type DatasetsStatusMsg struct {
-	Text  string
-	IsErr bool
-	Path  string // pool or pool/dataset path fragment
-}
-
-// DatasetsBackMsg requests return to home (from pools list).
-type DatasetsBackMsg struct{}
-
-// OpenPoolMsg requests loading datasets for a pool (handled by App).
-type OpenPoolMsg struct {
-	Pool string
-}
-
-// ReloadPoolsMsg requests re-fetching the pools list (handled by App).
-type ReloadPoolsMsg struct{}
-
-// Datasets is the pools → datasets browser.
+// Datasets is the host-wide pool → dataset → snapshot dashboard.
 type Datasets struct {
-	Width  int
-	Height int
-
-	level  datasetLevel
-	pool   string
-	filter string
-	// filtering is true while the user is typing a filter query after "/".
-	filtering bool
-
-	pools    []zfs.Pool
-	datasets []zfs.Dataset
-	cursor   int
-	// offset is the first visible list row index (scroll window).
-	offset  int
-	loading bool
-	err     string
+	Width, Height                 int
+	pools                         []zfs.Pool
+	datasets                      []zfs.Dataset
+	snapshots                     []zfs.Snapshot
+	cfg                           *config.Config
+	cron                          cronpkg.Status
+	errors                        []string
+	expanded, marked, failedMarks map[string]bool
+	cursor, offset                int
+	filter                        string
+	filtering, loading, busy      bool
+	Confirm                       Confirm
+	level                         datasetLevel
+	pool                          string
+	legacy                        bool
 }
 
-// Chrome lines reserved before data rows can paint:
-// app status+help (2) + title (1) + blank (1) + table header (1).
-// Height is the full terminal height (same value App receives).
-const datasetsChromeLines = 5
+const datasetsChromeLines = 7
 
-// IsFiltering reports whether the filter input is active.
-func (d Datasets) IsFiltering() bool { return d.filtering }
-
-// NewDatasets constructs an empty browser (call InitLoad after wiring).
-func NewDatasets() Datasets {
-	return Datasets{level: levelPools, loading: true}
+func NewDatasets(cfg ...*config.Config) Datasets {
+	var c *config.Config
+	if len(cfg) > 0 {
+		c = cfg[0]
+	}
+	return Datasets{cfg: c, loading: true, expanded: map[string]bool{}, marked: map[string]bool{}, failedMarks: map[string]bool{}}
 }
-
-// Path returns the current breadcrumb path for the status bar.
+func (d Datasets) Init() tea.Cmd       { return nil }
+func (d Datasets) IsFiltering() bool   { return d.filtering }
+func (d Datasets) InputCaptured() bool { return d.filtering || d.Confirm.Active }
 func (d Datasets) Path() string {
-	if d.level == levelDatasets && d.pool != "" {
-		return d.pool
+	if n := d.selected(); n != nil {
+		return n.dataset
 	}
 	return ""
 }
 
-// LoadPoolsCmd fetches pools via the zfs client.
 func LoadPoolsCmd(z zfs.Client) tea.Cmd {
-	return func() tea.Msg {
-		pools, err := z.ListPools(context.Background())
-		return PoolsLoadedMsg{Pools: pools, Err: err}
-	}
+	return func() tea.Msg { p, e := z.ListPools(context.Background()); return PoolsLoadedMsg{p, e} }
 }
-
-// LoadDatasetsCmd fetches datasets under pool.
 func LoadDatasetsCmd(z zfs.Client, pool string) tea.Cmd {
 	return func() tea.Msg {
-		ds, err := z.ListDatasets(context.Background(), pool)
-		return DatasetsLoadedMsg{Pool: pool, Datasets: ds, Err: err}
+		ds, e := z.ListDatasets(context.Background(), pool)
+		return DatasetsLoadedMsg{pool, ds, e}
+	}
+}
+func LoadDashboardCmd(z zfs.Client, cfg *config.Config, binary, cfgPath string) tea.Cmd {
+	return func() tea.Msg {
+		type poolsResult struct {
+			v   []zfs.Pool
+			err error
+		}
+		type datasetsResult struct {
+			v   []zfs.Dataset
+			err error
+		}
+		type snapshotsResult struct {
+			v   []zfs.Snapshot
+			err error
+		}
+		pc := make(chan poolsResult, 1)
+		dc := make(chan datasetsResult, 1)
+		sc := make(chan snapshotsResult, 1)
+		cc := make(chan cronpkg.Status, 1)
+		go func() { v, e := z.ListPools(context.Background()); pc <- poolsResult{v, e} }()
+		go func() { v, e := z.ListDatasets(context.Background(), ""); dc <- datasetsResult{v, e} }()
+		go func() { v, e := z.ListSnapshots(context.Background(), ""); sc <- snapshotsResult{v, e} }()
+		go func() {
+			if cfg == nil {
+				cc <- cronpkg.Status{Mode: "none", Err: fmt.Errorf("no config loaded")}
+				return
+			}
+			bin := binary
+			if bin == "" {
+				bin = "zfstui"
+			}
+			cc <- cronpkg.Inspect(cfg, bin, cfgPath, os.Geteuid() == 0)
+		}()
+		pr, dr, sr := <-pc, <-dc, <-sc
+		m := DashboardLoadedMsg{}
+		m.Pools, m.PoolsErr = pr.v, pr.err
+		m.Datasets, m.DatasetsErr = dr.v, dr.err
+		m.Snapshots, m.SnapshotsErr = sr.v, sr.err
+		m.Cron = <-cc
+		return m
+	}
+}
+func BulkDestroyCmd(z zfs.Client, snaps []zfs.Snapshot, dryRun bool) tea.Cmd {
+	list := append([]zfs.Snapshot(nil), snaps...)
+	sort.SliceStable(list, func(i, j int) bool {
+		di, dj := snapshotDataset(list[i].Name), snapshotDataset(list[j].Name)
+		if di != dj {
+			return di < dj
+		}
+		if !list[i].Creation.Equal(list[j].Creation) {
+			return list[i].Creation.Before(list[j].Creation)
+		}
+		return list[i].Name < list[j].Name
+	})
+	return func() tea.Msg {
+		r := BulkDestroyResultMsg{Errors: map[string]error{}}
+		for _, s := range list {
+			if e := z.DestroySnapshot(context.Background(), s.Name, false); e != nil {
+				r.Failed = append(r.Failed, s.Name)
+				r.Errors[s.Name] = e
+			} else if dryRun {
+				r.Simulated = append(r.Simulated, s.Name)
+			} else {
+				r.Succeeded = append(r.Succeeded, s.Name)
+			}
+		}
+		return r
 	}
 }
 
-// Init implements tea.Model.
-func (d Datasets) Init() tea.Cmd { return nil }
-
-// Update handles keys and load results.
 func (d Datasets) Update(msg tea.Msg) (Datasets, tea.Cmd) {
-	switch msg := msg.(type) {
+	if d.Confirm.Active {
+		var c tea.Cmd
+		d.Confirm, c = d.Confirm.Update(msg)
+		return d, c
+	}
+	switch m := msg.(type) {
+	case DashboardLoadedMsg:
+		selectedKey := ""
+		if n := d.selected(); n != nil {
+			selectedKey = n.key
+		}
+		d.loading, d.busy = false, false
+		d.pools, d.datasets, d.snapshots, d.cron = m.Pools, m.Datasets, m.Snapshots, m.Cron
+		d.errors = nil
+		for label, e := range map[string]error{"pools": m.PoolsErr, "datasets": m.DatasetsErr, "snapshots": m.SnapshotsErr} {
+			if e != nil {
+				d.errors = append(d.errors, label+": "+e.Error())
+			}
+		}
+		sort.Strings(d.errors)
+		d.retainMarks()
+		d.clamp()
+		if selectedKey != "" {
+			d.selectKey(selectedKey)
+			d = d.ensureCursorVisible()
+		}
+		return d, statusCmd(d.summaryStatus(), len(d.errors) > 0, "")
 	case PoolsLoadedMsg:
-		d.loading = false
 		d.level = levelPools
-		d.pool = ""
-		d.pools = msg.Pools
-		d.cursor = 0
-		d.offset = 0
-		d.filter = ""
-		d.filtering = false
-		if msg.Err != nil {
-			d.err = msg.Err.Error()
-			return d, statusCmd(msg.Err.Error(), true, "")
-		}
-		d.err = ""
-		return d, statusCmd(fmt.Sprintf("%d pool(s)", len(d.pools)), false, "")
-
+		d.legacy = true
+		return d.Update(DashboardLoadedMsg{Pools: m.Pools, PoolsErr: m.Err})
 	case DatasetsLoadedMsg:
-		d.loading = false
-		d.level = levelDatasets
-		d.pool = msg.Pool
-		d.datasets = msg.Datasets
-		d.cursor = 0
-		d.offset = 0
-		d.filter = ""
-		d.filtering = false
-		if msg.Err != nil {
-			d.err = msg.Err.Error()
-			return d, statusCmd(msg.Err.Error(), true, msg.Pool)
+		d.level, d.pool = levelDatasets, m.Pool
+		d.legacy = true
+		d.datasets = m.Datasets
+		if m.Pool != "" {
+			found := false
+			for _, p := range d.pools {
+				if p.Name == m.Pool {
+					found = true
+				}
+			}
+			if !found {
+				d.pools = append(d.pools, zfs.Pool{Name: m.Pool})
+			}
+			d.expanded["pool:"+m.Pool] = true
 		}
-		d.err = ""
-		return d, statusCmd(fmt.Sprintf("%d dataset(s)", len(d.datasets)), false, msg.Pool)
-
+		d.loading = false
+		if m.Err != nil {
+			d.errors = []string{"datasets: " + m.Err.Error()}
+		}
+		d.clamp()
+		return d, nil
+	case ConfirmResultMsg:
+		if m.ID == "bulk-destroy" && m.Confirmed {
+			t := d.targets()
+			d.busy = true
+			return d, func() tea.Msg { return BulkDestroyRequestMsg{Snapshots: t} }
+		}
+		return d, nil
 	case tea.KeyMsg:
 		if d.filtering {
-			return d.updateFilter(msg)
+			return d.updateFilter(m)
 		}
-		return d.updateNav(msg)
+		return d.updateNav(m)
 	}
 	return d, nil
 }
 
-func (d Datasets) updateFilter(msg tea.KeyMsg) (Datasets, tea.Cmd) {
+func (d Datasets) updateFilter(m tea.KeyMsg) (Datasets, tea.Cmd) {
 	switch {
-	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+	case key.Matches(m, key.NewBinding(key.WithKeys("esc"))):
 		d.filtering = false
 		d.filter = ""
-		d.cursor = 0
-		d.offset = 0
-		return d, nil
-	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+	case key.Matches(m, key.NewBinding(key.WithKeys("enter"))):
 		d.filtering = false
-		d.cursor = 0
-		d.offset = 0
-		return d, nil
-	case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
+	case key.Matches(m, key.NewBinding(key.WithKeys("backspace"))):
 		if len(d.filter) > 0 {
 			d.filter = d.filter[:len(d.filter)-1]
-			d.cursor = 0
-			d.offset = 0
 		}
-	case msg.Type == tea.KeyRunes:
-		d.filter += string(msg.Runes)
-		d.cursor = 0
-		d.offset = 0
+	case m.Type == tea.KeyRunes:
+		d.filter += string(m.Runes)
 	}
+	d.cursor, d.offset = 0, 0
 	return d, nil
 }
-
-func (d Datasets) updateNav(msg tea.KeyMsg) (Datasets, tea.Cmd) {
-	rows := d.visibleRows()
+func (d Datasets) updateNav(m tea.KeyMsg) (Datasets, tea.Cmd) {
+	rowCount := len(d.visibleRows())
 	switch {
-	case key.Matches(msg, key.NewBinding(key.WithKeys("up", "k"))):
-		if d.cursor > 0 {
-			d.cursor--
-		} else if len(rows) > 0 {
-			d.cursor = len(rows) - 1
+	case key.Matches(m, key.NewBinding(key.WithKeys("up", "k"))):
+		if rowCount > 0 {
+			d.cursor = (d.cursor - 1 + rowCount) % rowCount
 		}
-		d = d.ensureCursorVisible()
-	case key.Matches(msg, key.NewBinding(key.WithKeys("down", "j"))):
-		if len(rows) == 0 {
-			// nothing
-		} else if d.cursor < len(rows)-1 {
-			d.cursor++
-		} else {
-			d.cursor = 0
+	case key.Matches(m, key.NewBinding(key.WithKeys("down", "j"))):
+		if rowCount > 0 {
+			d.cursor = (d.cursor + 1) % rowCount
 		}
-		d = d.ensureCursorVisible()
-	case key.Matches(msg, key.NewBinding(key.WithKeys("/"))):
-		if d.level == levelDatasets {
-			d.filtering = true
-		}
-	case key.Matches(msg, key.NewBinding(key.WithKeys("esc", "backspace"))):
-		if d.level == levelDatasets {
-			// Back to pools — parent reloads.
-			d.level = levelPools
-			d.pool = ""
-			d.filter = ""
-			d.cursor = 0
-			d.offset = 0
-			d.loading = true
-			return d, func() tea.Msg { return ReloadPoolsMsg{} }
-		}
+	case key.Matches(m, key.NewBinding(key.WithKeys("/"))):
+		d.filtering = true
+	case key.Matches(m, key.NewBinding(key.WithKeys("R"))):
+		d.loading = true
+		return d, func() tea.Msg { return ReloadPoolsMsg{} }
+	case key.Matches(m, key.NewBinding(key.WithKeys("esc", "backspace"))):
 		return d, func() tea.Msg { return DatasetsBackMsg{} }
-	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
-		if len(rows) == 0 || d.cursor < 0 || d.cursor >= len(rows) {
-			return d, nil
+	case key.Matches(m, key.NewBinding(key.WithKeys("enter", "right", "l"))):
+		if n := d.selected(); n != nil && n.kind != nodeSnapshot {
+			d.expanded[n.key] = true
 		}
-		name := rows[d.cursor]
-		if d.level == levelPools {
-			d.loading = true
-			d.err = ""
-			return d, func() tea.Msg { return OpenPoolMsg{Pool: name} }
+	case key.Matches(m, key.NewBinding(key.WithKeys("left", "h"))):
+		if n := d.selected(); n != nil {
+			if d.expanded[n.key] {
+				d.expanded[n.key] = false
+			} else if n.parent != "" {
+				d.selectKey(n.parent)
+			}
 		}
-		// Drill into snapshots.
-		return d, func() tea.Msg { return OpenSnapshotsMsg{Dataset: name} }
+	case key.Matches(m, key.NewBinding(key.WithKeys(" "))):
+		if n := d.selected(); n != nil && n.kind == nodeSnapshot {
+			d.marked[n.key] = !d.marked[n.key]
+			delete(d.failedMarks, n.key)
+		}
+	case key.Matches(m, key.NewBinding(key.WithKeys("d"))):
+		return d.beginDelete()
+	case key.Matches(m, key.NewBinding(key.WithKeys("o"))):
+		if n := d.selected(); n != nil && n.dataset != "" {
+			return d, func() tea.Msg { return OpenSnapshotsMsg{Dataset: n.dataset} }
+		}
 	}
+	d = d.ensureCursorVisible()
 	return d, nil
 }
 
-// listPageSize is how many data rows fit in the terminal viewport for n total rows.
-// When the list overflows, one line is reserved for the "showing N–M of T" hint.
+func (d Datasets) beginDelete() (Datasets, tea.Cmd) {
+	t := d.targets()
+	if len(t) == 0 {
+		return d, statusCmd("select a snapshot to delete", true, d.Path())
+	}
+	sets := map[string]bool{}
+	var total uint64
+	var preview []string
+	for _, s := range t {
+		sets[snapshotDataset(s.Name)] = true
+		total += s.UsedBytes
+		if len(preview) < 6 {
+			preview = append(preview, "  "+s.Name)
+		}
+	}
+	if len(t) > len(preview) {
+		preview = append(preview, fmt.Sprintf("  … and %d more", len(t)-len(preview)))
+	}
+	body := fmt.Sprintf("%d snapshot(s) across %d dataset(s)\n%s snapshot unique used\n%s", len(t), len(sets), formatBytes(total), strings.Join(preview, "\n"))
+	d.Confirm = OpenType("bulk-destroy", "Delete snapshots", body, fmt.Sprintf("DELETE %d", len(t)), "")
+	d.Confirm.Width = minInt(d.Width-4, 72)
+	return d, nil
+}
+func (d Datasets) targets() []zfs.Snapshot {
+	marks := d.marked
+	if lenTrue(marks) == 0 {
+		marks = map[string]bool{}
+		if n := d.selected(); n != nil && n.kind == nodeSnapshot {
+			marks[n.key] = true
+		}
+	}
+	var out []zfs.Snapshot
+	for _, s := range d.snapshots {
+		if marks[s.Name] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+func (d *Datasets) ApplyBulkResult(r BulkDestroyResultMsg) {
+	d.busy = false
+	d.failedMarks = map[string]bool{}
+	d.marked = map[string]bool{}
+	for _, n := range r.Failed {
+		d.marked[n] = true
+		d.failedMarks[n] = true
+	}
+}
+
+func (d Datasets) tree() []treeNode {
+	poolMap := map[string]*treeNode{}
+	dsMap := map[string]*treeNode{}
+	for _, p := range d.pools {
+		poolMap[p.Name] = &treeNode{kind: nodePool, key: "pool:" + p.Name, name: p.Name}
+	}
+	for _, ds := range d.datasets {
+		pool := strings.SplitN(ds.Name, "/", 2)[0]
+		if poolMap[pool] == nil {
+			poolMap[pool] = &treeNode{kind: nodePool, key: "pool:" + pool, name: pool}
+		}
+		parent := "pool:" + pool
+		depth := 1
+		if i := strings.LastIndex(ds.Name, "/"); i >= 0 {
+			parent = "ds:" + ds.Name[:i]
+			depth = strings.Count(ds.Name, "/") + 1
+		}
+		dsMap[ds.Name] = &treeNode{kind: nodeDataset, key: "ds:" + ds.Name, name: ds.Name, parent: parent, dataset: ds.Name, depth: depth}
+	}
+	// Snapshot inventory remains useful even when dataset listing failed or a
+	// dataset disappeared between the independent host-wide reads.
+	for _, s := range d.snapshots {
+		ds := snapshotDataset(s.Name)
+		if ds == "" || dsMap[ds] != nil {
+			continue
+		}
+		pool := strings.SplitN(ds, "/", 2)[0]
+		if poolMap[pool] == nil {
+			poolMap[pool] = &treeNode{kind: nodePool, key: "pool:" + pool, name: pool}
+		}
+		parent, depth := "pool:"+pool, 1
+		if i := strings.LastIndex(ds, "/"); i >= 0 {
+			parent = "ds:" + ds[:i]
+			depth = strings.Count(ds, "/") + 1
+		}
+		dsMap[ds] = &treeNode{kind: nodeDataset, key: "ds:" + ds, name: ds, parent: parent, dataset: ds, depth: depth}
+	}
+	for _, n := range dsMap {
+		if strings.HasPrefix(n.parent, "ds:") && dsMap[strings.TrimPrefix(n.parent, "ds:")] == nil {
+			n.parent = "pool:" + strings.SplitN(n.dataset, "/", 2)[0]
+			n.depth = 1
+		}
+	}
+	for _, s := range d.snapshots {
+		ds := snapshotDataset(s.Name)
+		n := dsMap[ds]
+		if n == nil {
+			continue
+		}
+		n.count++
+		n.bytes += s.UsedBytes
+		if s.Creation.After(n.newest) {
+			n.newest = s.Creation
+		}
+	}
+	for _, n := range dsMap {
+		n.direct, n.inherited = d.schedulesFor(n.dataset)
+		p := poolMap[strings.SplitN(n.dataset, "/", 2)[0]]
+		p.count += n.count
+		p.bytes += n.bytes
+	}
+	var all []treeNode
+	for _, n := range poolMap {
+		all = append(all, *n)
+	}
+	for _, n := range dsMap {
+		all = append(all, *n)
+	}
+	for _, s := range d.snapshots {
+		ds := snapshotDataset(s.Name)
+		dn := dsMap[ds]
+		if dn == nil {
+			continue
+		}
+		short := s.Name
+		if i := strings.Index(short, "@"); i >= 0 {
+			short = short[i+1:]
+		}
+		all = append(all, treeNode{kind: nodeSnapshot, key: s.Name, name: short, parent: "ds:" + ds, dataset: ds, depth: dn.depth + 1, bytes: s.UsedBytes, creation: s.Creation})
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		a, b := all[i], all[j]
+		pa, pb := treePath(a), treePath(b)
+		if pa != pb {
+			return pa < pb
+		}
+		if a.kind != b.kind {
+			return a.kind < b.kind
+		}
+		if a.kind == nodeSnapshot && !a.creation.Equal(b.creation) {
+			return a.creation.Before(b.creation)
+		}
+		return a.key < b.key
+	})
+	return all
+}
+func treePath(n treeNode) string {
+	if n.kind == nodePool {
+		return n.name
+	}
+	if n.kind == nodeDataset {
+		return n.dataset + "!"
+	}
+	return n.dataset + "@" + n.name
+}
+func (d Datasets) schedulesFor(dataset string) (direct, inherited []config.Schedule) {
+	if d.cfg == nil {
+		return
+	}
+	for _, s := range d.cfg.Schedules {
+		if !s.Enabled {
+			continue
+		}
+		if s.Dataset == dataset {
+			direct = append(direct, s)
+		} else if s.Recursive && strings.HasPrefix(dataset, s.Dataset+"/") {
+			inherited = append(inherited, s)
+		}
+	}
+	return
+}
+func (d Datasets) visibleNodes() []treeNode {
+	all := d.tree()
+	q := strings.ToLower(d.filter)
+	matches := map[string]bool{}
+	if q != "" {
+		by := map[string]treeNode{}
+		for _, n := range all {
+			by[n.key] = n
+		}
+		for _, n := range all {
+			if strings.Contains(strings.ToLower(n.name), q) || strings.Contains(strings.ToLower(n.dataset), q) {
+				for cur := n.key; cur != ""; {
+					matches[cur] = true
+					cur = by[cur].parent
+				}
+			}
+		}
+	}
+	var out []treeNode
+	visible := map[string]bool{}
+	for _, n := range all {
+		if q != "" && !matches[n.key] {
+			continue
+		}
+		if n.parent != "" {
+			if q == "" && !visible[n.parent] {
+				continue
+			}
+			if q != "" && !matches[n.parent] {
+				continue
+			}
+		}
+		out = append(out, n)
+		visible[n.key] = q != "" || n.kind == nodeSnapshot || d.expanded[n.key]
+	}
+	return out
+}
+func (d Datasets) visibleRows() []string {
+	if d.legacy && d.level == levelDatasets {
+		q := strings.ToLower(d.filter)
+		var out []string
+		for _, ds := range d.datasets {
+			if q == "" || strings.Contains(strings.ToLower(ds.Name), q) {
+				out = append(out, ds.Name)
+			}
+		}
+		return out
+	}
+	ns := d.visibleNodes()
+	out := make([]string, len(ns))
+	for i := range ns {
+		out[i] = ns[i].name
+	}
+	return out
+}
+func (d Datasets) selected() *treeNode {
+	r := d.visibleNodes()
+	if d.cursor < 0 || d.cursor >= len(r) {
+		return nil
+	}
+	n := r[d.cursor]
+	return &n
+}
+func (d *Datasets) selectKey(k string) {
+	for i, n := range d.visibleNodes() {
+		if n.key == k {
+			d.cursor = i
+			return
+		}
+	}
+}
+func (d *Datasets) retainMarks() {
+	exists := map[string]bool{}
+	for _, s := range d.snapshots {
+		exists[s.Name] = true
+	}
+	for n := range d.marked {
+		if !exists[n] && !d.failedMarks[n] {
+			delete(d.marked, n)
+		}
+	}
+}
+func (d *Datasets) clamp() {
+	n := len(d.visibleRows())
+	if n == 0 {
+		d.cursor, d.offset = 0, 0
+	} else if d.cursor >= n {
+		d.cursor = n - 1
+	}
+	*d = d.ensureCursorVisible()
+}
+func (d Datasets) summaryStatus() string {
+	return fmt.Sprintf("%d snapshots · %s snapshot unique used", len(d.snapshots), formatBytes(sumSnapshots(d.snapshots)))
+}
 func (d Datasets) listPageSize(n int) int {
 	h := d.Height - datasetsChromeLines
 	if h < 1 {
 		h = 1
 	}
 	if n > h && h > 1 {
-		h-- // room for scrollHint
+		h--
 	}
 	return h
 }
-
-// ensureCursorVisible adjusts offset so the cursor row stays on-screen.
 func (d Datasets) ensureCursorVisible() Datasets {
 	n := len(d.visibleRows())
-	page := d.listPageSize(n)
-	if n <= 0 {
-		d.offset = 0
-		d.cursor = 0
+	p := d.listPageSize(n)
+	if n == 0 {
+		d.cursor, d.offset = 0, 0
 		return d
 	}
 	if d.cursor < 0 {
@@ -268,243 +609,255 @@ func (d Datasets) ensureCursorVisible() Datasets {
 	if d.cursor >= n {
 		d.cursor = n - 1
 	}
-	if d.offset < 0 {
-		d.offset = 0
-	}
 	if d.cursor < d.offset {
 		d.offset = d.cursor
 	}
-	if d.cursor >= d.offset+page {
-		d.offset = d.cursor - page + 1
+	if d.cursor >= d.offset+p {
+		d.offset = d.cursor - p + 1
 	}
-	maxOff := n - page
-	if maxOff < 0 {
-		maxOff = 0
+	max := n - p
+	if max < 0 {
+		max = 0
 	}
-	if d.offset > maxOff {
-		d.offset = maxOff
+	if d.offset > max {
+		d.offset = max
 	}
 	return d
 }
-
-// windowBounds returns the half-open [start, end) range of rows to paint.
-func (d Datasets) windowBounds(n int) (start, end int) {
-	if n <= 0 {
+func (d Datasets) windowBounds(n int) (int, int) {
+	if n == 0 {
 		return 0, 0
 	}
-	page := d.listPageSize(n)
-	start = d.offset
-	if start < 0 {
-		start = 0
+	p := d.listPageSize(n)
+	s := d.offset
+	if s < 0 || s >= n {
+		s = 0
 	}
-	if start >= n {
-		start = 0
+	e := s + p
+	if e > n {
+		e = n
 	}
-	end = start + page
-	if end > n {
-		end = n
-	}
-	return start, end
+	return s, e
 }
-
 func statusCmd(text string, isErr bool, path string) tea.Cmd {
-	return func() tea.Msg {
-		return DatasetsStatusMsg{Text: text, IsErr: isErr, Path: path}
-	}
+	return func() tea.Msg { return DatasetsStatusMsg{text, isErr, path} }
 }
 
-func (d Datasets) visibleRows() []string {
-	switch d.level {
-	case levelPools:
-		var names []string
-		for _, p := range d.pools {
-			names = append(names, p.Name)
-		}
-		return names
-	case levelDatasets:
-		q := strings.ToLower(d.filter)
-		var names []string
-		for _, ds := range d.datasets {
-			if q != "" && !strings.Contains(strings.ToLower(ds.Name), q) {
-				continue
-			}
-			names = append(names, ds.Name)
-		}
-		return names
-	}
-	return nil
-}
-
-// View renders the browser table.
 func (d Datasets) View() string {
-	var b strings.Builder
-
+	if d.legacy && d.level == levelDatasets {
+		return d.legacyDatasetsView()
+	}
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22d3ee"))
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#6b7280"))
-	accent := lipgloss.NewStyle().Foreground(lipgloss.Color("#e879f9"))
-
-	switch d.level {
-	case levelPools:
-		b.WriteString(title.Render("◆ Pools"))
-		b.WriteString(muted.Render("  · enter open · esc home"))
-	case levelDatasets:
-		b.WriteString(title.Render("◆ Datasets"))
-		b.WriteString(accent.Render("  " + d.pool))
-		if d.filter != "" || d.filtering {
-			b.WriteString(muted.Render("  filter: "))
-			filtStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#fbbf24"))
-			if d.filtering {
-				b.WriteString(filtStyle.Render(d.filter + "▌"))
-			} else {
-				b.WriteString(filtStyle.Render(d.filter))
-			}
-		}
-	}
-	b.WriteString("\n\n")
-
-	if d.loading {
-		b.WriteString(muted.Render("  loading…"))
-		return b.String()
-	}
-	if d.err != "" && len(d.visibleRows()) == 0 {
-		errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f87171"))
-		b.WriteString(errStyle.Render("  " + d.err))
-		return b.String()
-	}
-
-	switch d.level {
-	case levelPools:
-		b.WriteString(d.renderPools())
-	case levelDatasets:
-		b.WriteString(d.renderDatasets())
-	}
-	return b.String()
-}
-
-func (d Datasets) renderPools() string {
-	header := tableHeader([]colSpec{
-		{Title: "NAME", Width: 24},
-		{Title: "HEALTH", Width: 10},
-		{Title: "SIZE", Width: 10},
-		{Title: "ALLOC", Width: 10},
-	})
-	rows := d.visibleRows()
-	if len(rows) == 0 {
-		return header + "\n" + mutedLine("  (no pools)")
-	}
-	// Index pools by name for column data.
-	byName := map[string]zfs.Pool{}
-	for _, p := range d.pools {
-		byName[p.Name] = p
-	}
-	start, end := d.windowBounds(len(rows))
-	var lines []string
-	lines = append(lines, header)
-	for i := start; i < end; i++ {
-		p := byName[rows[i]]
-		line := tableRow([]string{p.Name, p.Health, p.Size, p.Alloc}, []int{24, 10, 10, 10}, i == d.cursor)
-		lines = append(lines, line)
-	}
-	if start > 0 || end < len(rows) {
-		lines = append(lines, scrollHint(start, end, len(rows)))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (d Datasets) renderDatasets() string {
-	header := tableHeader([]colSpec{
-		{Title: "NAME", Width: 36},
-		{Title: "USED", Width: 8},
-		{Title: "AVAIL", Width: 8},
-		{Title: "TYPE", Width: 10},
-		{Title: "MOUNTPOINT", Width: 20},
-	})
-	rows := d.visibleRows()
-	if len(rows) == 0 {
-		msg := "  (no datasets)"
-		if d.filter != "" {
-			msg = "  (no match for filter)"
-		}
-		return header + "\n" + mutedLine(msg)
-	}
-	byName := map[string]zfs.Dataset{}
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("#fbbf24"))
+	var b strings.Builder
+	b.WriteString(title.Render("◆ Snapshot Dashboard"))
+	b.WriteString(muted.Render("  · enter/right expand · space mark · d delete · o open · R reload"))
+	b.WriteString("\n")
+	state := cronState(d.cron)
+	scheduled := 0
 	for _, ds := range d.datasets {
-		byName[ds.Name] = ds
-	}
-	start, end := d.windowBounds(len(rows))
-	var lines []string
-	lines = append(lines, header)
-	for i := start; i < end; i++ {
-		ds := byName[rows[i]]
-		line := tableRow(
-			[]string{ds.Name, ds.Used, ds.Avail, ds.Type, ds.Mountpoint},
-			[]int{36, 8, 8, 10, 20},
-			i == d.cursor,
-		)
-		lines = append(lines, line)
-	}
-	if start > 0 || end < len(rows) {
-		lines = append(lines, scrollHint(start, end, len(rows)))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func scrollHint(start, end, total int) string {
-	// 1-based range for humans: "showing 6–15 of 40"
-	return mutedLine(fmt.Sprintf("  showing %d–%d of %d", start+1, end, total))
-}
-
-// --- shared table helpers (used by snapshots too) ---
-
-type colSpec struct {
-	Title string
-	Width int
-}
-
-func tableHeader(cols []colSpec) string {
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#6b7280")).Bold(true)
-	parts := make([]string, len(cols))
-	for i, c := range cols {
-		parts[i] = padTruncate(c.Title, c.Width)
-	}
-	return "  " + style.Render(strings.Join(parts, "  "))
-}
-
-func tableRow(cells []string, widths []int, selected bool) string {
-	parts := make([]string, len(cells))
-	for i, cell := range cells {
-		w := 12
-		if i < len(widths) {
-			w = widths[i]
+		a, c := d.schedulesFor(ds.Name)
+		if len(a)+len(c) > 0 {
+			scheduled++
 		}
-		parts[i] = padTruncate(cell, w)
 	}
-	content := strings.Join(parts, "  ")
-	if selected {
-		cursor := lipgloss.NewStyle().Foreground(lipgloss.Color("#22d3ee")).Bold(true).Render("▸ ")
-		sel := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#0d1117")).
-			Background(lipgloss.Color("#22d3ee")).
-			Bold(true)
-		return cursor + sel.Render(content)
+	summary := fmt.Sprintf("  %d snapshots  %s snapshot unique used  %d scheduled datasets  cron: %s", len(d.snapshots), formatBytes(sumSnapshots(d.snapshots)), scheduled, state)
+	if state != "in sync" {
+		b.WriteString(warn.Render(summary))
+	} else {
+		b.WriteString(muted.Render(summary))
 	}
-	return "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Render(content)
+	b.WriteString("\n")
+	if d.filter != "" || d.filtering {
+		b.WriteString(muted.Render("  filter: "))
+		b.WriteString(warn.Render(d.filter + map[bool]string{true: "▌"}[d.filtering]))
+		b.WriteString("\n")
+	}
+	for _, e := range d.errors {
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#f87171")).Render("  " + e))
+		b.WriteString("\n")
+	}
+	if d.cron.Err != nil {
+		b.WriteString(warn.Render("  cron: " + d.cron.Err.Error()))
+		b.WriteString("\n")
+	}
+	if d.loading {
+		b.WriteString("\n" + muted.Render("  loading host inventory…"))
+		return b.String()
+	}
+	rows := d.visibleNodes()
+	if len(rows) == 0 {
+		b.WriteString("\n" + muted.Render("  (no matching pools, datasets, or snapshots)"))
+		return b.String()
+	}
+	b.WriteString("\n")
+	s, e := d.windowBounds(len(rows))
+	for i := s; i < e; i++ {
+		b.WriteString(d.renderNode(rows[i], i == d.cursor))
+		b.WriteString("\n")
+	}
+	if s > 0 || e < len(rows) {
+		b.WriteString(scrollHint(s, e, len(rows)) + "\n")
+	}
+	if d.Width < 90 {
+		if n := d.selected(); n != nil {
+			b.WriteString(muted.Render("  "+d.metadata(*n)) + "\n")
+		}
+	}
+	if d.busy {
+		b.WriteString(muted.Render("  deleting snapshots…") + "\n")
+	}
+	if d.Confirm.Active {
+		return b.String() + "\n" + lipgloss.NewStyle().PaddingLeft(2).Render(d.Confirm.View())
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
-func padTruncate(s string, w int) string {
-	if w <= 0 {
+func (d Datasets) legacyDatasetsView() string {
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22d3ee")).Render("◆ Datasets"))
+	b.WriteString("\n\n")
+	header := tableHeader([]colSpec{{"NAME", 36}, {"USED", 8}, {"AVAIL", 8}, {"TYPE", 10}, {"MOUNTPOINT", 20}})
+	b.WriteString(header + "\n")
+	rows := d.visibleRows()
+	if len(rows) == 0 {
+		return b.String() + mutedLine("  (no datasets)")
+	}
+	by := map[string]zfs.Dataset{}
+	for _, v := range d.datasets {
+		by[v.Name] = v
+	}
+	s, e := d.windowBounds(len(rows))
+	for i := s; i < e; i++ {
+		v := by[rows[i]]
+		b.WriteString(tableRow([]string{v.Name, v.Used, v.Avail, v.Type, v.Mountpoint}, []int{36, 8, 8, 10, 20}, i == d.cursor) + "\n")
+	}
+	if s > 0 || e < len(rows) {
+		b.WriteString(scrollHint(s, e, len(rows)))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+func (d Datasets) renderNode(n treeNode, selected bool) string {
+	indent := strings.Repeat("  ", n.depth)
+	glyph := "•"
+	if n.kind != nodeSnapshot {
+		glyph = "▸"
+		if d.expanded[n.key] || d.filter != "" {
+			glyph = "▾"
+		}
+	}
+	mark := " "
+	if d.marked[n.key] {
+		mark = "✓"
+	}
+	line := fmt.Sprintf("%s%s [%s] %s", indent, glyph, mark, n.name)
+	if d.Width >= 90 {
+		line += "  " + d.metadata(n)
+	}
+	if selected {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#0d1117")).Background(lipgloss.Color("#22d3ee")).Bold(true).Render("▸ " + line)
+	}
+	return "  " + line
+}
+func (d Datasets) metadata(n treeNode) string {
+	switch n.kind {
+	case nodePool:
+		return fmt.Sprintf("%d snapshots · %s", n.count, formatBytes(n.bytes))
+	case nodeDataset:
+		badges := scheduleBadges(n.direct, n.inherited, d.cron)
+		newest := "never"
+		if !n.newest.IsZero() {
+			newest = n.newest.Local().Format("2006-01-02 15:04")
+		}
+		return fmt.Sprintf("%d direct · %s · newest %s%s", n.count, formatBytes(n.bytes), newest, badges)
+	default:
+		return fmt.Sprintf("%s · %s ago · %s", n.creation.Local().Format("2006-01-02 15:04:05"), relativeAge(n.creation), formatBytes(n.bytes))
+	}
+}
+func scheduleBadges(a, b []config.Schedule, st cronpkg.Status) string {
+	var x []string
+	for _, s := range a {
+		x = append(x, "[schedule:"+s.Name+"]")
+	}
+	for _, s := range b {
+		x = append(x, "[inherited:"+s.Name+"]")
+	}
+	if len(x) == 0 {
 		return ""
 	}
-	// Use rune-aware-ish via lipgloss width when possible; ASCII-heavy ZFS names.
-	if len(s) > w {
-		if w <= 1 {
-			return s[:w]
-		}
-		return s[:w-1] + "…"
+	if st.Err != nil || !st.Installed || !st.InSync {
+		x = append(x, "[cron warning]")
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return " · " + strings.Join(x, " ")
 }
-
-func mutedLine(s string) string {
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("#6b7280")).Render(s)
+func cronState(s cronpkg.Status) string {
+	if s.Err != nil {
+		return "unavailable"
+	}
+	if !s.Installed {
+		return "not installed"
+	}
+	if s.InSync {
+		return "in sync"
+	}
+	return "out of sync"
+}
+func snapshotDataset(n string) string {
+	if i := strings.Index(n, "@"); i >= 0 {
+		return n[:i]
+	}
+	return n
+}
+func sumSnapshots(s []zfs.Snapshot) uint64 {
+	var n uint64
+	for _, v := range s {
+		n += v.UsedBytes
+	}
+	return n
+}
+func formatBytes(n uint64) string {
+	const u = 1024
+	if n < u {
+		return fmt.Sprintf("%d B", n)
+	}
+	v := float64(n)
+	for _, x := range []string{"KiB", "MiB", "GiB", "TiB", "PiB"} {
+		v /= u
+		if v < u {
+			return fmt.Sprintf("%.1f %s", v, x)
+		}
+	}
+	return fmt.Sprintf("%.1f EiB", v/u)
+}
+func relativeAge(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	v := time.Since(t)
+	if v < 0 {
+		v = 0
+	}
+	if v < time.Minute {
+		return "<1m"
+	}
+	if v < time.Hour {
+		return fmt.Sprintf("%dm", int(v.Minutes()))
+	}
+	if v < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(v.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(v.Hours()/24))
+}
+func lenTrue(m map[string]bool) int {
+	n := 0
+	for _, v := range m {
+		if v {
+			n++
+		}
+	}
+	return n
+}
+func scrollHint(s, e, n int) string {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("#6b7280")).Render(fmt.Sprintf("  showing %d–%d of %d", s+1, e, n))
 }

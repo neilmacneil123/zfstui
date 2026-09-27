@@ -36,7 +36,7 @@ func (f *Fake) ListDatasets(ctx context.Context, poolOrDataset string) ([]Datase
 func (f *Fake) ListSnapshots(ctx context.Context, dataset string) ([]Snapshot, error) {
 	var out []Snapshot
 	for _, s := range f.Snapshots {
-		if strings.HasPrefix(s.Name, dataset+"@") {
+		if dataset == "" || strings.HasPrefix(s.Name, dataset+"@") {
 			out = append(out, s)
 		}
 	}

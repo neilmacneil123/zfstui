@@ -21,9 +21,13 @@ type Dataset struct {
 }
 
 type Snapshot struct {
-	Name     string
-	Used     string
-	Creation time.Time
+	Name string
+	Used string
+	// UsedBytes is the raw value of the ZFS snapshot "used" property. It is
+	// uniquely held snapshot space, not a guarantee of immediately reclaimable
+	// space. Used is retained for compatibility with older callers.
+	UsedBytes uint64
+	Creation  time.Time
 }
 
 type Client interface {

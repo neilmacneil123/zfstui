@@ -47,8 +47,8 @@ func NewHome() Home {
 		items: []menuItem{
 			{
 				Icon:   "◈",
-				Label:  "Pools & Datasets",
-				Desc:   "Browse pools, datasets, and snapshots",
+				Label:  "Snapshot Dashboard",
+				Desc:   "Host-wide pools, datasets, snapshots, and schedules",
 				Action: ActionPools,
 			},
 			{

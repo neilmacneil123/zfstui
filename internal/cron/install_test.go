@@ -10,6 +10,50 @@ import (
 	"github.com/zfstui/zfstui/internal/cron"
 )
 
+func TestInspectSystemStates(t *testing.T) {
+	cfg := config.Default()
+	cfg.Schedules = []config.Schedule{{Name: "daily", Dataset: "tank/a", Cron: "0 0 * * *", Enabled: true, Prefix: "z"}}
+	path := filepath.Join(t.TempDir(), "zfstui")
+	st := cron.InspectSystem(&cfg, "/bin/zfstui", "/cfg", path)
+	if st.Installed || st.Err != nil {
+		t.Fatalf("absent: %#v", st)
+	}
+	want, err := cron.RenderSystem(&cfg, "/bin/zfstui", "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(want), 0644); err != nil {
+		t.Fatal(err)
+	}
+	st = cron.InspectSystem(&cfg, "/bin/zfstui", "/cfg", path)
+	if !st.Installed || !st.InSync || st.Err != nil {
+		t.Fatalf("sync: %#v", st)
+	}
+	if err := os.WriteFile(path, []byte(want+"# stale\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	st = cron.InspectSystem(&cfg, "/bin/zfstui", "/cfg", path)
+	if !st.Installed || st.InSync {
+		t.Fatalf("stale: %#v", st)
+	}
+}
+
+func TestInspectUserManagedBlock(t *testing.T) {
+	cfg := config.Default()
+	block, err := cron.RenderUserBlock(&cfg, "zfstui", "/cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := cron.InspectUser(&cfg, "zfstui", "/cfg", "MAILTO=x\n"+block)
+	if !st.Installed || !st.InSync {
+		t.Fatalf("status %#v", st)
+	}
+	st = cron.InspectUser(&cfg, "zfstui", "/cfg", "")
+	if st.Installed {
+		t.Fatalf("status %#v", st)
+	}
+}
+
 func TestWriteFileAtomicAndInstallSystemFile(t *testing.T) {
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "cron.d", "zfstui")

@@ -73,8 +73,11 @@ func (c *CLI) ListPools(ctx context.Context) ([]Pool, error) {
 }
 
 func (c *CLI) ListDatasets(ctx context.Context, poolOrDataset string) ([]Dataset, error) {
-	out, err := c.Runner(ctx, c.ZfsPath, "list", "-H", "-r", "-t", "filesystem,volume",
-		"-o", "name,used,avail,mountpoint,type", poolOrDataset)
+	args := []string{"list", "-H", "-r", "-t", "filesystem,volume", "-o", "name,used,avail,mountpoint,type"}
+	if poolOrDataset != "" {
+		args = append(args, poolOrDataset)
+	}
+	out, err := c.Runner(ctx, c.ZfsPath, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -91,8 +94,11 @@ func (c *CLI) ListDatasets(ctx context.Context, poolOrDataset string) ([]Dataset
 
 func (c *CLI) ListSnapshots(ctx context.Context, dataset string) ([]Snapshot, error) {
 	// Prefer -p so creation is a parseable unix timestamp.
-	out, err := c.Runner(ctx, c.ZfsPath, "list", "-H", "-p", "-r", "-t", "snapshot",
-		"-o", "name,used,creation", "-s", "creation", dataset)
+	args := []string{"list", "-H", "-p", "-r", "-t", "snapshot", "-o", "name,used,creation", "-s", "creation"}
+	if dataset != "" {
+		args = append(args, dataset)
+	}
+	out, err := c.Runner(ctx, c.ZfsPath, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +108,15 @@ func (c *CLI) ListSnapshots(ctx context.Context, dataset string) ([]Snapshot, er
 		if len(f) < 3 {
 			continue
 		}
+		used, parseErr := strconv.ParseUint(strings.TrimSpace(f[1]), 10, 64)
+		if parseErr != nil {
+			continue
+		}
 		cre := parseCreation(f[2])
-		snaps = append(snaps, Snapshot{Name: f[0], Used: f[1], Creation: cre})
+		if cre.IsZero() {
+			continue
+		}
+		snaps = append(snaps, Snapshot{Name: f[0], Used: f[1], UsedBytes: used, Creation: cre})
 	}
 	return snaps, nil
 }

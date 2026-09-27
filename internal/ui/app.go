@@ -148,7 +148,7 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case screens.PoolsLoadedMsg, screens.DatasetsLoadedMsg:
+	case screens.PoolsLoadedMsg, screens.DatasetsLoadedMsg, screens.DashboardLoadedMsg:
 		var cmd tea.Cmd
 		m.datasets, cmd = m.datasets.Update(msg)
 		return m, cmd
@@ -173,8 +173,17 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case screens.ReloadPoolsMsg:
 		m.navPath = ""
-		m.setStatus("Loading pools…", false)
-		return m, screens.LoadPoolsCmd(m.deps.Z)
+		m.setStatus("Loading host inventory…", false)
+		return m, screens.LoadDashboardCmd(m.deps.Z, m.deps.Cfg, m.deps.Binary, m.deps.CfgPath)
+
+	case screens.BulkDestroyRequestMsg:
+		m.setStatus(fmt.Sprintf("Deleting %d snapshot(s)…", len(msg.Snapshots)), false)
+		return m, screens.BulkDestroyCmd(m.deps.Z, msg.Snapshots, m.deps.DryRun)
+
+	case screens.BulkDestroyResultMsg:
+		m.datasets.ApplyBulkResult(msg)
+		m.setStatus(fmt.Sprintf("delete: %d succeeded, %d failed, %d simulated", len(msg.Succeeded), len(msg.Failed), len(msg.Simulated)), len(msg.Failed) > 0)
+		return m, screens.LoadDashboardCmd(m.deps.Z, m.deps.Cfg, m.deps.Binary, m.deps.CfgPath)
 
 	case screens.OpenSnapshotsMsg:
 		return m.openSnapshots(msg.Dataset)
@@ -220,6 +229,10 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case screens.ConfirmResultMsg:
 		switch m.screen {
+		case screenDatasets:
+			var cmd tea.Cmd
+			m.datasets, cmd = m.datasets.Update(msg)
+			return m, cmd
 		case screenSnapshots:
 			var cmd tea.Cmd
 			m.snapshots, cmd = m.snapshots.Update(msg)
@@ -349,7 +362,7 @@ func (m App) shouldGlobalQuit(msg tea.KeyMsg) bool {
 }
 
 func (m App) inputCaptured() bool {
-	if m.screen == screenDatasets && m.datasets.IsFiltering() {
+	if m.screen == screenDatasets && m.datasets.InputCaptured() {
 		return true
 	}
 	if m.screen == screenSnapshots && (m.snapshots.Confirm.Active || m.snapshots.Restore.Active) {
@@ -386,12 +399,12 @@ func (m App) handleSelect(action screens.MenuAction) (tea.Model, tea.Cmd) {
 	switch action {
 	case screens.ActionPools:
 		m.screen = screenDatasets
-		m.datasets = screens.NewDatasets()
+		m.datasets = screens.NewDatasets(m.deps.Cfg)
 		m.datasets.Width = m.width
 		m.datasets.Height = m.height
 		m.navPath = ""
-		m.setStatus("Loading pools…", false)
-		return m, screens.LoadPoolsCmd(m.deps.Z)
+		m.setStatus("Loading host inventory…", false)
+		return m, screens.LoadDashboardCmd(m.deps.Z, m.deps.Cfg, m.deps.Binary, m.deps.CfgPath)
 	case screens.ActionSchedules:
 		m.schedules = screens.NewSchedules(m.deps.Cfg, m.deps.CfgPath, m.deps.Z)
 		m.schedules.Width = m.width
@@ -442,17 +455,13 @@ func (m App) openSnapshots(dataset string) (tea.Model, tea.Cmd) {
 }
 
 func (m App) backFromSnapshots(dataset string) (tea.Model, tea.Cmd) {
-	pool := dataset
-	if i := strings.Index(dataset, "/"); i > 0 {
-		pool = dataset[:i]
-	}
 	m.screen = screenDatasets
-	m.datasets = screens.NewDatasets()
+	m.datasets = screens.NewDatasets(m.deps.Cfg)
 	m.datasets.Width = m.width
 	m.datasets.Height = m.height
-	m.navPath = pool
-	m.setStatus("Loading datasets…", false)
-	return m, screens.LoadDatasetsCmd(m.deps.Z, pool)
+	m.navPath = ""
+	m.setStatus("Loading host inventory…", false)
+	return m, screens.LoadDashboardCmd(m.deps.Z, m.deps.Cfg, m.deps.Binary, m.deps.CfgPath)
 }
 
 func (m App) handleSnapshotOpDone(msg screens.SnapshotOpDoneMsg) (tea.Model, tea.Cmd) {
@@ -555,10 +564,14 @@ func (m App) viewHelp() string {
 		helpRow("?", "Toggle this help"),
 		helpRow("q", "Quit"),
 		"",
-		MutedStyle.Render("Pools & datasets:"),
-		helpRow("/", "Filter datasets"),
-		helpRow("c", "Create snapshot"),
-		helpRow("d", "Destroy (typed confirm)"),
+		MutedStyle.Render("Snapshot dashboard:"),
+		helpRow("enter / →", "Expand branch"),
+		helpRow("←", "Collapse / parent"),
+		helpRow("/", "Filter entire tree"),
+		helpRow("space", "Mark snapshot"),
+		helpRow("d", "Delete marked snapshots"),
+		helpRow("o", "Open full snapshot screen"),
+		helpRow("R", "Reload inventory"),
 		"",
 		MutedStyle.Render("Snapshots:"),
 		helpRow("c / d", "Create / destroy"),
@@ -635,7 +648,10 @@ func (m App) viewHelpBar() string {
 		} else {
 			hints = []string{
 				HelpHint("j/k", "move"),
-				HelpHint("enter", "open"),
+				HelpHint("←/→", "collapse/expand"),
+				HelpHint("space", "mark"),
+				HelpHint("d", "delete"),
+				HelpHint("o", "open"),
 				HelpHint("/", "filter"),
 				HelpHint("esc", "back"),
 				HelpHint("q", "quit"),

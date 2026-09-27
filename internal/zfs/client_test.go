@@ -2,11 +2,42 @@ package zfs_test
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/zfstui/zfstui/internal/zfs"
 )
+
+func TestListSnapshotsHostWideParsesRawBytesAndSkipsMalformed(t *testing.T) {
+	c := zfs.NewCLI(false)
+	var got []string
+	c.Runner = func(ctx context.Context, name string, args ...string) (string, error) {
+		got = append([]string{name}, args...)
+		return "tank/a@good\t4096\t1700000000\ntank/a@bad\tnot-a-number\t1700000001\ntank/a@badtime\t1\tbad\n", nil
+	}
+	s, err := c.ListSnapshots(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s) != 1 || s[0].UsedBytes != 4096 || s[0].Used != "4096" {
+		t.Fatalf("snapshots: %#v", s)
+	}
+	want := []string{"zfs", "list", "-H", "-p", "-r", "-t", "snapshot", "-o", "name,used,creation", "-s", "creation"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args=%v want %v", got, want)
+	}
+}
+
+func TestListSnapshotsDatasetKeepsScopeArgument(t *testing.T) {
+	c := zfs.NewCLI(false)
+	var got []string
+	c.Runner = func(ctx context.Context, name string, args ...string) (string, error) { got = args; return "", nil }
+	_, _ = c.ListSnapshots(context.Background(), "tank/a")
+	if got[len(got)-1] != "tank/a" {
+		t.Fatalf("args %v", got)
+	}
+}
 
 func TestListPoolsParses(t *testing.T) {
 	c := zfs.NewCLI(false)
